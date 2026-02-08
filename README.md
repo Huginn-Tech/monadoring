@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-black?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 
-**Real-time validator uptime monitoring for Monad network**
+**Validator uptime monitoring for Monad network**
 
 [Features](#features) • [Quick Start](#quick-start) • [Configuration](#configuration) • [Alerts](#alerts) • [API](#api)
 
@@ -19,7 +19,7 @@
 
 ![Monadoring Dashboard](public/screenshot.png)
 
-*Real-time validator monitoring with uptime visualization. Example: https://monadoring.huginn.tech/*
+*Validator dashboard with uptime visualization. Example: https://monadoring.huginn.tech/*
 
 <img width="905" height="355" alt="image" src="https://github.com/user-attachments/assets/1ed52a02-3a8b-4344-a010-d549ec6e8aad" />
 
@@ -28,7 +28,7 @@
 ## Features
 
 <details>
-<summary><strong>🖥️ Real-Time Dashboard</strong></summary>
+<summary><strong>🖥️ Validator Dashboard</strong></summary>
 <br>
 Web dashboard running on port 3030 with dark/light theme support. Visualize your validator uptime in real-time.
 </details>
