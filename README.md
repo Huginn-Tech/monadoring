@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-black?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 
-**Validator uptime monitoring for Monad network**
+**Validator uptime dashboard for Monad network**
 
 [Features](#features) • [Quick Start](#quick-start) • [Configuration](#configuration) • [Alerts](#alerts) • [API](#api)
 
