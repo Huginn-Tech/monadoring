@@ -21,7 +21,7 @@
 
 *Validator dashboard with uptime visualization. Example: https://monadoring.huginn.tech/*
 
-<img width="905" height="355" alt="image" src="https://github.com/user-attachments/assets/1ed52a02-3a8b-4344-a010-d549ec6e8aad" />
+<img width="905" height="355" alt="image" src="public/logs.png" />
 
 </div>
 
