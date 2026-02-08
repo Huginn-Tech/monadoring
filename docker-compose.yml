@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  monadoring:
+    build: .
+    container_name: monadoring
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3030}:3030"
+    environment:
+      # Required
+      - MAINNET_VALIDATORS=${MAINNET_VALIDATORS}
+      - TESTNET_VALIDATORS=${TESTNET_VALIDATORS}
+      - MAINNET_RPCS=${MAINNET_RPCS:-https://monad-rpc.huginn.tech,https://rpc.monad.xyz}
+      - TESTNET_RPCS=${TESTNET_RPCS}
+      # RPC Monitoring (optional)
+      - RPC_ALERTS=${RPC_ALERTS:-off}
+      # Alerts (optional)
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
+      - PAGERDUTY_THRESHOLD=${PAGERDUTY_THRESHOLD:-5}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3030"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
