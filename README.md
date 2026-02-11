@@ -9,7 +9,7 @@
 
 **Validator uptime dashboard for Monad network**
 
-[Features](#features) • [Quick Start](#quick-start) • [Configuration](#configuration) • [Alerts](#alerts) • [API](#api)
+[Features](#features) • [Quick Start](#quick-start) • [Configuration](#configuration) • [Alerts](#alerts) • [API](https://monval.huginn.tech/monad-validator-api))
 
 </div>
 
