@@ -60,7 +60,7 @@ This alerting/monitoring system <strong>does not require a Monad Node</strong>. 
 <details>
 <summary><strong>🌐 Monad Validator API</strong></summary>
 <br>
-All validator events are fetched from <a href="https://monval.huginn.tech/monad-validator-api">Monad Validator API</a>. No need to run your Monad node.
+All validator events are fetched from <a href="https://monval.huginn.tech/monad-validator-api">Monad Validator API</a>.
 </details>
 
 Supports both Mainnet and Testnet.
