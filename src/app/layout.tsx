@@ -3,10 +3,10 @@ import { ThemeProvider } from "@/components/validator-dashboard"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "Monadoring - Validator Monitor",
-  description: "Real-time validator uptime monitoring for Monad network",
+  title: "Monadoring - Validator Dashboard",
+  description: "Real-time monitoring for Monad network",
   icons: {
-    icon: "/favicon.ico",
+    icon: "/icon.png",
   },
 }
 
