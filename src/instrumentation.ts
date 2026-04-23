@@ -1,7 +1,7 @@
 // Next.js Instrumentation - runs on server startup
 // https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 
-import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendTelegramStatusChange, sendDiscordStatusChange } from '@/lib/alerts'
+import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendSlackAlert, sendTelegramStatusChange, sendDiscordStatusChange, sendSlackStatusChange } from '@/lib/alerts'
 
 let shutdownHandlersRegistered = false
 let missedBlockCheckInterval: NodeJS.Timeout | null = null
@@ -79,6 +79,10 @@ async function getAlertConfig() {
     ? { webhookUrl: process.env.DISCORD_WEBHOOK_URL }
     : undefined
 
+  const slack = process.env.SLACK_WEBHOOK_URL
+    ? { webhookUrl: process.env.SLACK_WEBHOOK_URL }
+    : undefined
+
   const port = process.env.PORT || '3030'
   const dashboardUrl = `http://localhost:${port}`
   const validatorName = await getValidatorName()
@@ -87,17 +91,18 @@ async function getAlertConfig() {
   const alertStatus = {
     telegram: !!telegram,
     discord: !!discord,
+    slack: !!slack,
     pagerduty: !!process.env.PAGERDUTY_ROUTING_KEY
   }
 
-  return { telegram, discord, validatorName, dashboardUrl, alertStatus }
+  return { telegram, discord, slack, validatorName, dashboardUrl, alertStatus }
 }
 
 async function sendStartupNotification() {
   const config = await getAlertConfig()
   cachedConfig = config // Cache for shutdown use
 
-  if (!config.telegram && !config.discord) {
+  if (!config.telegram && !config.discord && !config.slack) {
     console.log('[Monadoring] No alert services configured, skipping startup notification')
     return
   }
@@ -105,7 +110,8 @@ async function sendStartupNotification() {
   console.log('[Monadoring] Sending startup notifications...')
   console.log('[Monadoring] Config:', {
     telegram: config.telegram ? 'configured' : 'not configured',
-    discord: config.discord ? 'configured' : 'not configured'
+    discord: config.discord ? 'configured' : 'not configured',
+    slack: config.slack ? 'configured' : 'not configured'
   })
 
   try {
@@ -117,6 +123,9 @@ async function sendStartupNotification() {
     if (config.discord) {
       console.log(`[Monadoring] Discord: ${results.discord ? 'sent' : 'FAILED'}`)
     }
+    if (config.slack) {
+      console.log(`[Monadoring] Slack: ${results.slack ? 'sent' : 'FAILED'}`)
+    }
   } catch (error) {
     console.error('[Monadoring] Startup notification error:', error)
   }
@@ -126,7 +135,7 @@ async function sendShutdownNotification() {
   // Use cached config to avoid network calls during shutdown
   const config = cachedConfig
 
-  if (!config || (!config.telegram && !config.discord)) {
+  if (!config || (!config.telegram && !config.discord && !config.slack)) {
     return
   }
 
@@ -135,6 +144,7 @@ async function sendShutdownNotification() {
 
   if (results.telegram) console.log('[Monadoring] Telegram shutdown notification sent')
   if (results.discord) console.log('[Monadoring] Discord shutdown notification sent')
+  if (results.slack) console.log('[Monadoring] Slack shutdown notification sent')
 }
 
 function registerShutdownHandlers() {
@@ -445,6 +455,9 @@ async function checkValidatorMissedBlocks(
         if (cachedConfig.discord) {
           await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
         }
+        if (cachedConfig.slack) {
+          await sendSlackAlert(cachedConfig.slack.webhookUrl, payload)
+        }
       } else {
         const hadMisses = state.consecutiveMisses > 0 && state.alertedForMiss
         const previousStreak = state.consecutiveMisses
@@ -471,6 +484,9 @@ async function checkValidatorMissedBlocks(
           }
           if (cachedConfig.discord) {
             await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
+          }
+          if (cachedConfig.slack) {
+            await sendSlackAlert(cachedConfig.slack.webhookUrl, payload)
           }
         } else {
           console.log(`[Monadoring] 🧊 ${validatorName} ${networkLabel} ~ Finalized round ${ev.round}`)
@@ -546,6 +562,9 @@ async function checkValidatorStatus(
     }
     if (cachedConfig.discord) {
       await sendDiscordStatusChange(cachedConfig.discord.webhookUrl, payload)
+    }
+    if (cachedConfig.slack) {
+      await sendSlackStatusChange(cachedConfig.slack.webhookUrl, payload)
     }
   } catch (err) {
     if ((err as Error)?.name === 'AbortError') return

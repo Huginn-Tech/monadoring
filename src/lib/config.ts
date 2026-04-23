@@ -21,6 +21,10 @@ export interface AlertConfig {
     enabled: boolean
     webhookUrl: string
   }
+  slack: {
+    enabled: boolean
+    webhookUrl: string
+  }
   pagerduty: {
     enabled: boolean
     routingKey: string
@@ -89,6 +93,10 @@ export function getConfig(): Config {
       discord: {
         enabled: !!process.env.DISCORD_WEBHOOK_URL,
         webhookUrl: process.env.DISCORD_WEBHOOK_URL || ''
+      },
+      slack: {
+        enabled: !!process.env.SLACK_WEBHOOK_URL,
+        webhookUrl: process.env.SLACK_WEBHOOK_URL || ''
       },
       pagerduty: {
         enabled: !!process.env.PAGERDUTY_ROUTING_KEY,

@@ -40,9 +40,9 @@ Used to display <strong>Current Height</strong>. Auto-failover when primary goes
 </details>
 
 <details>
-<summary><strong>🔔 Telegram & Discord Alerting (Optional)</strong></summary>
+<summary><strong>🔔 Telegram, Discord & Slack Alerting (Optional)</strong></summary>
 <br>
-Get instant notifications for every missed block. Enable <code>RPC_ALERTS=on</code> to also monitor RPC endpoints (offline/online, failover, all RPCs down alerts).
+Get instant notifications for every missed block across Telegram, Discord, and Slack. Enable <code>RPC_ALERTS=on</code> to also monitor RPC endpoints (offline/online, failover, all RPCs down alerts).
 </details>
 
 <details>
@@ -176,6 +176,12 @@ TELEGRAM_CHAT_ID=
 DISCORD_WEBHOOK_URL=
 
 # ============================================
+# SLACK ALERTS (Optional)
+# ============================================
+# Create an Incoming Webhook: https://api.slack.com/messaging/webhooks
+SLACK_WEBHOOK_URL=
+
+# ============================================
 # PAGERDUTY ALERTS (Optional)
 # ============================================
 # Get routing key from PagerDuty service integration
@@ -196,6 +202,7 @@ PAGERDUTY_THRESHOLD=5
 | `TELEGRAM_BOT_TOKEN` | ❌ | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | ❌ | Telegram chat/group ID |
 | `DISCORD_WEBHOOK_URL` | ❌ | Discord webhook URL |
+| `SLACK_WEBHOOK_URL` | ❌ | Slack Incoming Webhook URL |
 | `PAGERDUTY_ROUTING_KEY` | ❌ | PagerDuty routing key |
 | `PAGERDUTY_THRESHOLD` | ❌ | Consecutive misses before PagerDuty alert (default: 5) |
 

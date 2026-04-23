@@ -1,4 +1,4 @@
-// Alert notifications for Telegram, Discord, and PagerDuty
+// Alert notifications for Telegram, Discord, Slack, and PagerDuty
 
 interface AlertPayload {
   validator: string
@@ -15,6 +15,7 @@ type LifecycleEvent = 'startup' | 'shutdown'
 interface AlertStatus {
   telegram: boolean
   discord: boolean
+  slack: boolean
   pagerduty: boolean
 }
 
@@ -136,26 +137,109 @@ export async function sendDiscordRpcAlert(
   }
 }
 
+// RPC Slack Alert
+export async function sendSlackRpcAlert(
+  webhookUrl: string,
+  payload: RpcAlertPayload
+): Promise<boolean> {
+  if (!webhookUrl) return false
+
+  const network = payload.network.toUpperCase()
+  let title = ''
+  let fields: Array<{ type: 'mrkdwn'; text: string }> = []
+  let color = ''
+  let context = ''
+
+  if (payload.type === 'all_offline') {
+    color = '#dc2626' // red-600
+    title = '🚨 *ALL RPCs OFFLINE*'
+    fields = [
+      { type: 'mrkdwn', text: `*Network*\n${network}` },
+      { type: 'mrkdwn', text: `*Downtime*\n${payload.downtime || 'Unknown'}` }
+    ]
+    const causes = payload.chainProgressing
+      ? '⚠️ *Possible causes:*\n• Rate limiting on RPC endpoints\n• Incorrect RPC URLs in config'
+      : '⚠️ *Possible causes:*\n• Rate limiting on RPC endpoints\n• Incorrect RPC URLs in config\n• Network/chain may be halted'
+    context = `${causes}\n_Check your RPC configuration or network status_`
+  } else if (payload.type === 'failover') {
+    color = '#f59e0b' // amber
+    title = '⚠️ *RPC Failover*'
+    fields = [
+      { type: 'mrkdwn', text: `*Network*\n${network}` },
+      { type: 'mrkdwn', text: `*From*\n\`${payload.failoverFrom}\`` },
+      { type: 'mrkdwn', text: `*To*\n\`${payload.failoverTo}\`` }
+    ]
+    context = '_Primary RPC is offline, switched to secondary_'
+  } else {
+    const emoji = payload.type === 'offline' ? '🔴' : '🟢'
+    const status = payload.type === 'offline' ? 'OFFLINE' : 'ONLINE'
+    const rpcType = payload.isPrimary ? 'Primary' : 'Secondary'
+    color = payload.type === 'offline' ? '#ef4444' : '#22c55e'
+    title = `${emoji} *RPC ${status}*`
+    fields = [
+      { type: 'mrkdwn', text: `*Network*\n${network}` },
+      { type: 'mrkdwn', text: `*Type*\n${rpcType}` },
+      { type: 'mrkdwn', text: `*URL*\n\`${payload.rpcUrl}\`` }
+    ]
+  }
+
+  const blocks: unknown[] = [
+    { type: 'section', text: { type: 'mrkdwn', text: title } },
+    { type: 'section', fields }
+  ]
+
+  if (context) {
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: context }]
+    })
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: 'Monadoring RPC Alert' }]
+  })
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        attachments: [{ color, blocks }]
+      })
+    })
+    return res.ok
+  } catch (error) {
+    console.error('Slack RPC alert failed:', error)
+    return false
+  }
+}
+
 // Send RPC alert to all configured services
 export async function sendRpcAlert(
   config: {
     telegram?: { botToken: string; chatId: string }
     discord?: { webhookUrl: string }
+    slack?: { webhookUrl: string }
   },
   payload: RpcAlertPayload
-): Promise<{ telegram: boolean; discord: boolean }> {
+): Promise<{ telegram: boolean; discord: boolean; slack: boolean }> {
   const results = await Promise.all([
     config.telegram
       ? sendTelegramRpcAlert(config.telegram.botToken, config.telegram.chatId, payload)
       : Promise.resolve(false),
     config.discord
       ? sendDiscordRpcAlert(config.discord.webhookUrl, payload)
+      : Promise.resolve(false),
+    config.slack
+      ? sendSlackRpcAlert(config.slack.webhookUrl, payload)
       : Promise.resolve(false)
   ])
 
   return {
     telegram: results[0],
-    discord: results[1]
+    discord: results[1],
+    slack: results[2]
   }
 }
 
@@ -174,7 +258,7 @@ export async function sendTelegramLifecycle(
   let alertStatusPart = ''
   if (isStartup && payload.alertStatus) {
     const s = payload.alertStatus
-    alertStatusPart = `\n\n*Alerts:*\nTelegram: ${s.telegram ? '✅' : '❌'} | Discord: ${s.discord ? '✅' : '❌'} | PagerDuty: ${s.pagerduty ? '✅' : '❌'}`
+    alertStatusPart = `\n\n*Alerts:*\nTelegram: ${s.telegram ? '✅' : '❌'} | Discord: ${s.discord ? '✅' : '❌'} | Slack: ${s.slack ? '✅' : '❌'} | PagerDuty: ${s.pagerduty ? '✅' : '❌'}`
   }
 
   const message = isStartup
@@ -242,17 +326,85 @@ export async function sendDiscordLifecycle(
   }
 }
 
+// Lifecycle Slack Notification
+export async function sendSlackLifecycle(
+  webhookUrl: string,
+  payload: LifecyclePayload
+): Promise<boolean> {
+  if (!webhookUrl) return false
+
+  const isStartup = payload.event === 'startup'
+  const color = isStartup ? '#22c55e' : '#ef4444'
+  const validatorPart = payload.validatorName ? ` (${payload.validatorName})` : ''
+
+  const headline = isStartup
+    ? `🟢 Monadoring is now *online*${validatorPart}`
+    : `🔴 Monadoring is now *offline*${validatorPart}`
+
+  const blocks: unknown[] = [
+    { type: 'section', text: { type: 'mrkdwn', text: headline } }
+  ]
+
+  if (isStartup) {
+    const detailLines: string[] = []
+    if (payload.dashboardUrl) {
+      detailLines.push(`📊 Dashboard: <${payload.dashboardUrl}|${payload.dashboardUrl}>`)
+    }
+    detailLines.push('_Observing validator uptime_')
+
+    if (detailLines.length > 0) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: detailLines.join('\n') }
+      })
+    }
+
+    if (payload.alertStatus) {
+      const s = payload.alertStatus
+      const statusLine = `*Alerts*\nTelegram: ${s.telegram ? '✅' : '❌'}  |  Discord: ${s.discord ? '✅' : '❌'}  |  Slack: ${s.slack ? '✅' : '❌'}  |  PagerDuty: ${s.pagerduty ? '✅' : '❌'}`
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: statusLine }
+      })
+    }
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: 'Monadoring' }]
+  })
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        attachments: [{ color, blocks }]
+      })
+    })
+    if (!res.ok) {
+      const errorData = await res.text().catch(() => '')
+      console.error('Slack webhook error:', res.status, errorData)
+    }
+    return res.ok
+  } catch (error) {
+    console.error('Slack lifecycle alert failed:', error)
+    return false
+  }
+}
+
 // Send lifecycle notifications to all configured services
 export async function sendLifecycleNotifications(
   event: LifecycleEvent,
   config: {
     telegram?: { botToken: string; chatId: string }
     discord?: { webhookUrl: string }
+    slack?: { webhookUrl: string }
     validatorName?: string
     dashboardUrl?: string
     alertStatus?: AlertStatus
   }
-): Promise<{ telegram: boolean; discord: boolean }> {
+): Promise<{ telegram: boolean; discord: boolean; slack: boolean }> {
   const payload: LifecyclePayload = {
     event,
     timestamp: new Date(),
@@ -267,12 +419,16 @@ export async function sendLifecycleNotifications(
       : Promise.resolve(false),
     config.discord
       ? sendDiscordLifecycle(config.discord.webhookUrl, payload)
+      : Promise.resolve(false),
+    config.slack
+      ? sendSlackLifecycle(config.slack.webhookUrl, payload)
       : Promise.resolve(false)
   ])
 
   return {
     telegram: results[0],
-    discord: results[1]
+    discord: results[1],
+    slack: results[2]
   }
 }
 
@@ -339,6 +495,41 @@ export async function sendDiscordStatusChange(
     return res.ok
   } catch (error) {
     console.error('Discord status change alert failed:', error)
+    return false
+  }
+}
+
+// Validator set status change (active <-> inactive) - Slack
+export async function sendSlackStatusChange(
+  webhookUrl: string,
+  payload: StatusChangePayload
+): Promise<boolean> {
+  if (!webhookUrl) return false
+
+  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
+  const emoji = payload.status === 'active' ? '🟢' : '🔴'
+  const color = payload.status === 'active' ? '#22c55e' : '#ef4444'
+  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
+
+  const text = `${emoji} ${network} validator *${payload.validator}* now in *${payload.status}* set${epochPart}`
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        attachments: [{
+          color,
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text } },
+            { type: 'context', elements: [{ type: 'mrkdwn', text: 'Monadoring' }] }
+          ]
+        }]
+      })
+    })
+    return res.ok
+  } catch (error) {
+    console.error('Slack status change alert failed:', error)
     return false
   }
 }
@@ -434,6 +625,60 @@ export async function sendDiscordAlert(
   }
 }
 
+// Slack Alert
+export async function sendSlackAlert(
+  webhookUrl: string,
+  payload: AlertPayload
+): Promise<boolean> {
+  if (!webhookUrl) return false
+
+  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
+  const isMissed = payload.type === 'missed'
+  const color = isMissed ? '#ef4444' : '#22c55e'
+  const title = isMissed
+    ? `⛔ *Timeout detected* (#${payload.consecutiveMisses || 1})`
+    : '✅ *Recovered*'
+
+  const fields: Array<{ type: 'mrkdwn'; text: string }> = [
+    { type: 'mrkdwn', text: `*Round*\n\`${payload.round.toLocaleString()}\`` },
+    { type: 'mrkdwn', text: `*Validator*\n${payload.validator}` },
+    { type: 'mrkdwn', text: `*Network*\n${network}` }
+  ]
+
+  if (!isMissed && payload.previousStreak) {
+    fields.push({
+      type: 'mrkdwn',
+      text: `*Previous Streak*\n${payload.previousStreak}`
+    })
+  }
+
+  const body = {
+    attachments: [{
+      color,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: title } },
+        { type: 'section', fields },
+        {
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: 'Monadoring' }]
+        }
+      ]
+    }]
+  }
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    return res.ok
+  } catch (error) {
+    console.error('Slack alert failed:', error)
+    return false
+  }
+}
+
 // PagerDuty Alert
 export async function sendPagerDutyAlert(
   routingKey: string,
@@ -479,6 +724,7 @@ export async function sendPagerDutyAlert(
 interface AlertManagerConfig {
   telegram?: { botToken: string; chatId: string }
   discord?: { webhookUrl: string }
+  slack?: { webhookUrl: string }
   pagerduty?: { routingKey: string; threshold: number }
 }
 
@@ -526,6 +772,11 @@ export class AlertManager {
     // Discord: Alert on every miss
     if (this.config.discord) {
       await sendDiscordAlert(this.config.discord.webhookUrl, payload)
+    }
+
+    // Slack: Alert on every miss
+    if (this.config.slack) {
+      await sendSlackAlert(this.config.slack.webhookUrl, payload)
     }
 
     // PagerDuty: Alert after threshold

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import {
   sendTelegramAlert,
   sendDiscordAlert,
+  sendSlackAlert,
   sendPagerDutyAlert
 } from "@/lib/alerts"
 
@@ -87,6 +88,21 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // Slack
+      const slackWebhook = process.env.SLACK_WEBHOOK_URL
+      if (slackWebhook) {
+        try {
+          const res = await fetch(slackWebhook, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: message })
+          })
+          results.push({ service: "slack", success: res.ok })
+        } catch {
+          results.push({ service: "slack", success: false })
+        }
+      }
+
       return NextResponse.json({ success: true, alerts: results })
     }
 
@@ -127,6 +143,13 @@ export async function POST(request: NextRequest) {
     if (discordWebhook) {
       const success = await sendDiscordAlert(discordWebhook, payload)
       results.push({ service: "discord", success })
+    }
+
+    // Slack - every miss
+    const slackWebhook = process.env.SLACK_WEBHOOK_URL
+    if (slackWebhook) {
+      const success = await sendSlackAlert(slackWebhook, payload)
+      results.push({ service: "slack", success })
     }
 
     // PagerDuty - after threshold
