@@ -28,7 +28,7 @@ interface LifecyclePayload {
 }
 
 interface RpcAlertPayload {
-  type: 'offline' | 'online' | 'failover' | 'all_offline'
+  type: 'offline' | 'online' | 'failover' | 'recovered' | 'all_offline'
   rpcUrl: string
   network: 'mainnet' | 'testnet'
   isPrimary: boolean
@@ -63,6 +63,8 @@ export async function sendTelegramRpcAlert(
     message = `🚨 *ALL RPCs OFFLINE*\n\n*Network:* ${network}\n*Downtime:* ${payload.downtime || 'Unknown'}\n\n${causes}\n\n_Check your RPC configuration or network status_`
   } else if (payload.type === 'failover') {
     message = `⚠️ *RPC Failover*\n\n*Network:* ${network}\n*From:* \`${payload.failoverFrom}\`\n*To:* \`${payload.failoverTo}\`\n\n_Primary RPC is offline, switched to secondary_`
+  } else if (payload.type === 'recovered') {
+    message = `✅ *RPC Recovered*\n\n*Network:* ${network}\n*Primary:* \`${payload.failoverTo}\`\n\n_Switched back to primary RPC_`
   } else {
     const emoji = payload.type === 'offline' ? '🔴' : '🟢'
     const status = payload.type === 'offline' ? 'OFFLINE' : 'ONLINE'
@@ -107,6 +109,9 @@ export async function sendDiscordRpcAlert(
   } else if (payload.type === 'failover') {
     color = 0xf59e0b // amber
     description = `⚠️ **RPC Failover**\n\n**Network:** ${network}\n**From:** \`${payload.failoverFrom}\`\n**To:** \`${payload.failoverTo}\`\n\n_Primary RPC is offline, switched to secondary_`
+  } else if (payload.type === 'recovered') {
+    color = 0x22c55e // green-500
+    description = `✅ **RPC Recovered**\n\n**Network:** ${network}\n**Primary:** \`${payload.failoverTo}\`\n\n_Switched back to primary RPC_`
   } else {
     const emoji = payload.type === 'offline' ? '🔴' : '🟢'
     const status = payload.type === 'offline' ? 'OFFLINE' : 'ONLINE'
@@ -170,6 +175,14 @@ export async function sendSlackRpcAlert(
       { type: 'mrkdwn', text: `*To*\n\`${payload.failoverTo}\`` }
     ]
     context = '_Primary RPC is offline, switched to secondary_'
+  } else if (payload.type === 'recovered') {
+    color = '#22c55e' // green-500
+    title = '✅ *RPC Recovered*'
+    fields = [
+      { type: 'mrkdwn', text: `*Network*\n${network}` },
+      { type: 'mrkdwn', text: `*Primary*\n\`${payload.failoverTo}\`` }
+    ]
+    context = '_Switched back to primary RPC_'
   } else {
     const emoji = payload.type === 'offline' ? '🔴' : '🟢'
     const status = payload.type === 'offline' ? 'OFFLINE' : 'ONLINE'

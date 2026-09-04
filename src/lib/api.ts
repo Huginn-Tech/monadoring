@@ -110,10 +110,10 @@ export async function fetchHistory(
   }
 }
 
-export async function fetchBlockHeight(rpcUrl: string): Promise<number> {
+export async function fetchBlockHeight(rpcUrl: string, timeoutMs: number = 10000): Promise<number> {
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
     const res = await fetch(rpcUrl, {
       method: 'POST',
@@ -132,7 +132,10 @@ export async function fetchBlockHeight(rpcUrl: string): Promise<number> {
     if (!res.ok) return 0
 
     const data = await res.json()
-    return parseInt(data.result, 16)
+    if (!data.result) return 0
+
+    const height = parseInt(data.result, 16)
+    return Number.isFinite(height) ? height : 0
   } catch (error) {
     console.error(`Failed to fetch block height:`, error)
     return 0
@@ -166,30 +169,71 @@ export async function fetchCurrentEpoch(
   }
 }
 
-export async function checkRpcHealth(rpcUrl: string): Promise<boolean> {
-  try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 5000)
+export interface RpcHealthState {
+  height: number
+  staleCount: number
+}
 
-    const res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'eth_blockNumber',
-        params: [],
-        id: 1
-      }),
-      signal: controller.signal
-    })
-
-    clearTimeout(timeout)
-
-    if (!res.ok) return false
-
-    const data = await res.json()
-    return !!data.result
-  } catch {
-    return false
+/**
+ * Decide whether an RPC is healthy from its block height progression.
+ *
+ * Answering `eth_blockNumber` is not enough: an endpoint can keep replying
+ * while its height sits still, which means it is stuck rather than healthy.
+ * Callers keep the returned state and hand it back on the next check.
+ */
+export function evaluateRpcHealth(
+  previous: RpcHealthState | undefined,
+  currentHeight: number,
+  staleLimit: number = 2
+): { healthy: boolean; state: RpcHealthState } {
+  if (currentHeight <= 0) {
+    return {
+      healthy: false,
+      state: { height: previous?.height ?? 0, staleCount: (previous?.staleCount ?? 0) + 1 }
+    }
   }
+
+  // First observation - nothing to compare against yet
+  if (!previous) {
+    return { healthy: true, state: { height: currentHeight, staleCount: 0 } }
+  }
+
+  if (currentHeight > previous.height) {
+    return { healthy: true, state: { height: currentHeight, staleCount: 0 } }
+  }
+
+  const staleCount = previous.staleCount + 1
+  return {
+    healthy: staleCount < staleLimit,
+    state: { height: currentHeight, staleCount }
+  }
+}
+
+export function extractNameFromUrl(url: string): string {
+  try {
+    const hostname = new URL(url).hostname
+    const parts = hostname.split('.')
+    const domainPart = parts.length >= 2 ? parts[parts.length - 2] : parts[0]
+    return domainPart.charAt(0).toUpperCase() + domainPart.slice(1)
+  } catch {
+    return url
+  }
+}
+
+export function parseRpcConfig(envValue: string): { url: string; name: string }[] {
+  if (!envValue) return []
+  return envValue.split(',').map((entry) => {
+    const trimmed = entry.trim()
+    if (trimmed.includes(':https://') || trimmed.includes(':http://')) {
+      const colonIndex = trimmed.indexOf(':http')
+      return {
+        name: trimmed.substring(0, colonIndex),
+        url: trimmed.substring(colonIndex + 1)
+      }
+    }
+    return {
+      name: extractNameFromUrl(trimmed),
+      url: trimmed
+    }
+  }).filter(rpc => rpc.url)
 }
