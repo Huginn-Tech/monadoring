@@ -2,6 +2,7 @@
 // https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 
 import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendSlackAlert, sendTelegramStatusChange, sendDiscordStatusChange, sendSlackStatusChange } from '@/lib/alerts'
+import { parseRpcConfig } from '@/lib/api'
 
 let shutdownHandlersRegistered = false
 let missedBlockCheckInterval: NodeJS.Timeout | null = null
@@ -30,6 +31,12 @@ let allOfflineState: {
 } = {
   mainnet: { isOffline: false, since: null, alertSent: false },
   testnet: { isOffline: false, since: null, alertSent: false }
+}
+
+// Track which RPC each network is currently served from, for failover/recovery alerts
+const activeRpcState: Record<'mainnet' | 'testnet', { index: number; failedOver: boolean }> = {
+  mainnet: { index: 0, failedOver: false },
+  testnet: { index: 0, failedOver: false }
 }
 
 // Track last known block heights from Uptime API to detect chain progress
@@ -276,83 +283,114 @@ function isRpcHealthy(url: string, currentHeight: number): boolean {
   }
 }
 
-// Run RPC health check - only for all-offline detection
-async function runRpcHealthCheck() {
+// Alert when the active RPC fails, and again when the primary comes back.
+// Lives here rather than in the dashboard so alerts fire even with no browser open.
+async function checkRpcFailover(
+  network: 'mainnet' | 'testnet',
+  rpcs: { url: string; name: string }[],
+  healthy: boolean[]
+) {
+  if (!cachedConfig || rpcs.length === 0) return
+
+  const state = activeRpcState[network]
+  if (state.index >= rpcs.length) state.index = 0
+
+  const label = network.charAt(0).toUpperCase() + network.slice(1)
+
+  // Primary is back - return to it whether or not the current RPC is still fine
+  if (state.failedOver && state.index !== 0 && healthy[0]) {
+    console.log(`[Monadoring] ${label} primary RPC recovered: ${rpcs[0].name}`)
+    await sendRpcAlert(cachedConfig, {
+      type: 'recovered',
+      rpcUrl: rpcs[0].url,
+      network,
+      isPrimary: true,
+      failoverFrom: rpcs[state.index].name,
+      failoverTo: rpcs[0].name
+    })
+
+    state.index = 0
+    state.failedOver = false
+    return
+  }
+
+  if (healthy[state.index]) return
+
+  for (let i = 1; i < rpcs.length; i++) {
+    const next = (state.index + i) % rpcs.length
+    if (!healthy[next]) continue
+
+    console.log(`[Monadoring] ${label} RPC failover: ${rpcs[state.index].name} -> ${rpcs[next].name}`)
+    await sendRpcAlert(cachedConfig, {
+      type: 'failover',
+      rpcUrl: rpcs[next].url,
+      network,
+      isPrimary: next === 0,
+      failoverFrom: rpcs[state.index].name,
+      failoverTo: rpcs[next].name
+    })
+
+    state.index = next
+    state.failedOver = next !== 0
+    return
+  }
+
+  // Nothing healthy to switch to - the all-offline check reports that case
+}
+
+// Check one network's RPCs: failover/recovery alerts plus all-offline detection
+async function checkNetworkRpcs(network: 'mainnet' | 'testnet') {
   if (!cachedConfig) return
 
-  const mainnetRpcs = (process.env.MAINNET_RPCS || '').split(',').map(s => s.trim()).filter(Boolean)
-  const testnetRpcs = (process.env.TESTNET_RPCS || '').split(',').map(s => s.trim()).filter(Boolean)
+  const configured = network === 'mainnet' ? process.env.MAINNET_RPCS : process.env.TESTNET_RPCS
+  const rpcs = parseRpcConfig(configured || '')
+  if (rpcs.length === 0) return
 
-  // Check Mainnet RPCs - count healthy ones
-  let mainnetHealthy = 0
-  for (const url of mainnetRpcs) {
-    const height = await checkRpcHealth(url)
-    if (isRpcHealthy(url, height)) mainnetHealthy++
+  const healthy: boolean[] = []
+  for (const rpc of rpcs) {
+    const height = await checkRpcHealth(rpc.url)
+    healthy.push(isRpcHealthy(rpc.url, height))
   }
 
-  // Check Mainnet all-offline state
-  if (mainnetHealthy === 0 && mainnetRpcs.length > 0) {
-    if (!allOfflineState.mainnet.isOffline) {
-      allOfflineState.mainnet = { isOffline: true, since: new Date(), alertSent: false }
-    }
+  await checkRpcFailover(network, rpcs, healthy)
 
-    const downtime = allOfflineState.mainnet.since
-      ? Math.floor((Date.now() - allOfflineState.mainnet.since.getTime()) / 1000 / 60)
-      : 0
-
-    if (downtime >= 3 && !allOfflineState.mainnet.alertSent) {
-      const chainProgressing = await checkChainProgress('mainnet')
-      console.log(`[Monadoring] All Mainnet RPCs offline for ${downtime} minutes (chain progressing: ${chainProgressing})`)
-      await sendRpcAlert(cachedConfig, {
-        type: 'all_offline',
-        rpcUrl: mainnetRpcs.join(', '),
-        network: 'mainnet',
-        isPrimary: true,
-        downtime: `${downtime} minutes`,
-        chainProgressing
-      })
-      allOfflineState.mainnet.alertSent = true
-    }
-  } else if (mainnetHealthy > 0) {
-    allOfflineState.mainnet = { isOffline: false, since: null, alertSent: false }
+  if (healthy.some(Boolean)) {
+    allOfflineState[network] = { isOffline: false, since: null, alertSent: false }
+    return
   }
 
-  // Check Testnet RPCs - count healthy ones
-  let testnetHealthy = 0
-  for (const url of testnetRpcs) {
-    const height = await checkRpcHealth(url)
-    if (isRpcHealthy(url, height)) testnetHealthy++
+  if (!allOfflineState[network].isOffline) {
+    allOfflineState[network] = { isOffline: true, since: new Date(), alertSent: false }
   }
 
-  // Check Testnet all-offline state
-  if (testnetHealthy === 0 && testnetRpcs.length > 0) {
-    if (!allOfflineState.testnet.isOffline) {
-      allOfflineState.testnet = { isOffline: true, since: new Date(), alertSent: false }
-    }
+  const since = allOfflineState[network].since
+  const downtime = since ? Math.floor((Date.now() - since.getTime()) / 1000 / 60) : 0
 
-    const downtime = allOfflineState.testnet.since
-      ? Math.floor((Date.now() - allOfflineState.testnet.since.getTime()) / 1000 / 60)
-      : 0
-
-    if (downtime >= 3 && !allOfflineState.testnet.alertSent) {
-      const chainProgressing = await checkChainProgress('testnet')
-      console.log(`[Monadoring] All Testnet RPCs offline for ${downtime} minutes (chain progressing: ${chainProgressing})`)
-      await sendRpcAlert(cachedConfig, {
-        type: 'all_offline',
-        rpcUrl: testnetRpcs.join(', '),
-        network: 'testnet',
-        isPrimary: true,
-        downtime: `${downtime} minutes`,
-        chainProgressing
-      })
-      allOfflineState.testnet.alertSent = true
-    }
-  } else if (testnetHealthy > 0) {
-    allOfflineState.testnet = { isOffline: false, since: null, alertSent: false }
+  if (downtime >= 3 && !allOfflineState[network].alertSent) {
+    const chainProgressing = await checkChainProgress(network)
+    const label = network.charAt(0).toUpperCase() + network.slice(1)
+    console.log(`[Monadoring] All ${label} RPCs offline for ${downtime} minutes (chain progressing: ${chainProgressing})`)
+    await sendRpcAlert(cachedConfig, {
+      type: 'all_offline',
+      rpcUrl: rpcs.map(r => r.url).join(', '),
+      network,
+      isPrimary: true,
+      downtime: `${downtime} minutes`,
+      chainProgressing
+    })
+    allOfflineState[network].alertSent = true
   }
 }
 
-// Start RPC health monitoring (only for all-offline detection)
+// Run RPC health check for both networks
+async function runRpcHealthCheck() {
+  if (!cachedConfig) return
+
+  await checkNetworkRpcs('mainnet')
+  await checkNetworkRpcs('testnet')
+}
+
+// Start RPC health monitoring (failover, recovery and all-offline detection)
 function startRpcHealthMonitoring() {
   const rpcAlerts = (process.env.RPC_ALERTS || '').toLowerCase()
   if (rpcAlerts !== 'on') {
@@ -360,7 +398,7 @@ function startRpcHealthMonitoring() {
     return
   }
 
-  console.log('[Monadoring] RPC health monitoring enabled (1 min interval, all-offline alerts only)')
+  console.log('[Monadoring] RPC health monitoring enabled (1 min interval: failover, recovery, all-offline)')
 
   // First check after 30 seconds
   setTimeout(() => {

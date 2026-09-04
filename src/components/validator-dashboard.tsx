@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { ThemeProvider as NextThemesProvider, useTheme as useNextTheme } from "next-themes"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { RefreshCw, Moon, Sun } from "lucide-react"
-import { fetchBlockHeight, checkRpcHealth, fetchUptimeStats, fetchHistory, type ValidatorStatus } from "@/lib/api"
+import { fetchBlockHeight, evaluateRpcHealth, parseRpcConfig, fetchUptimeStats, fetchHistory, type RpcHealthState, type ValidatorStatus } from "@/lib/api"
 
 // ============ EXPORTS ============
 export function ThemeProvider({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) {
@@ -62,36 +62,6 @@ const RPC_CHECK_INTERVAL = 600000 // 10 minutes - for secondary RPCs liveliness 
 const DATA_POLL_INTERVAL = 2000 // 2 seconds - for primary RPC height polling
 const PRIMARY_RECOVERY_INTERVAL = 300000 // 5 minutes - check if primary is back online
 const FAILOVER_THRESHOLD = 30 // After 30 polls (1 minute) of issues, failover to secondary
-
-// ============ HELPERS ============
-function extractNameFromUrl(url: string): string {
-  try {
-    const hostname = new URL(url).hostname
-    const parts = hostname.split('.')
-    const domainPart = parts.length >= 2 ? parts[parts.length - 2] : parts[0]
-    return domainPart.charAt(0).toUpperCase() + domainPart.slice(1)
-  } catch {
-    return url
-  }
-}
-
-function parseRpcConfig(envValue: string): { url: string; name: string }[] {
-  if (!envValue) return []
-  return envValue.split(',').map((entry) => {
-    const trimmed = entry.trim()
-    if (trimmed.includes(':https://') || trimmed.includes(':http://')) {
-      const colonIndex = trimmed.indexOf(':http')
-      return {
-        name: trimmed.substring(0, colonIndex),
-        url: trimmed.substring(colonIndex + 1)
-      }
-    }
-    return {
-      name: extractNameFromUrl(trimmed),
-      url: trimmed
-    }
-  }).filter(rpc => rpc.url)
-}
 
 // ============ COMPONENTS ============
 function useTheme() {
@@ -340,27 +310,29 @@ export function ValidatorDashboard() {
   const mainnetIssueCountRef = useRef<number>(0)
   const testnetIssueCountRef = useRef<number>(0)
 
-  const mainnetFailoverAlertSentRef = useRef<boolean>(false)
-  const testnetFailoverAlertSentRef = useRef<boolean>(false)
+  // Last seen height per RPC, so an endpoint that answers but never advances
+  // is reported as offline instead of healthy
+  const rpcHealthStatesRef = useRef<Map<string, RpcHealthState>>(new Map())
 
   const checkAllRpcs = useCallback(async () => {
-    const mainnetResults = await Promise.all(
-      mainnetRpcConfigs.map(async (rpc, i) => ({
-        url: rpc.url,
-        name: rpc.name,
-        isOnline: await checkRpcHealth(rpc.url),
-        isPrimary: i === activeMainnetRpcIndex
-      }))
-    )
+    const probeAll = (configs: { url: string; name: string }[], activeIndex: number) =>
+      Promise.all(configs.map(async (rpc, i) => {
+        const height = await fetchBlockHeight(rpc.url, 5000)
+        const { healthy, state } = evaluateRpcHealth(rpcHealthStatesRef.current.get(rpc.url), height)
+        rpcHealthStatesRef.current.set(rpc.url, state)
 
-    const testnetResults = await Promise.all(
-      testnetRpcConfigs.map(async (rpc, i) => ({
-        url: rpc.url,
-        name: rpc.name,
-        isOnline: await checkRpcHealth(rpc.url),
-        isPrimary: i === activeTestnetRpcIndex
+        return {
+          url: rpc.url,
+          name: rpc.name,
+          isOnline: healthy,
+          isPrimary: i === activeIndex
+        }
       }))
-    )
+
+    const [mainnetResults, testnetResults] = await Promise.all([
+      probeAll(mainnetRpcConfigs, activeMainnetRpcIndex),
+      probeAll(testnetRpcConfigs, activeTestnetRpcIndex)
+    ])
 
     mainnetRpcsRef.current = mainnetResults
     testnetRpcsRef.current = testnetResults
@@ -408,32 +380,15 @@ export function ValidatorDashboard() {
     })
   }, [])
 
-  const sendRpcAlert = useCallback(async (
-    type: "rpc_failover" | "rpc_recovered",
-    network: "mainnet" | "testnet",
-    fromRpc: string,
-    toRpc: string,
-    reason?: string
-  ) => {
-    try {
-      await fetch("/api/alert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type, network, fromRpc, toRpc, reason })
-      })
-      console.log(`[Monadoring] Alert sent: ${type} on ${network}`)
-    } catch (err) {
-      console.error("[Monadoring] Failed to send alert:", err)
-    }
-  }, [])
-
+  // Switching RPCs here only keeps the dashboard showing live data. Failover and
+  // recovery alerts are sent from src/instrumentation.ts, which runs on the server
+  // whether or not anyone has this page open.
   const fetchCurrentHeight = useCallback(async (network: "mainnet" | "testnet"): Promise<number> => {
     const rpcConfigs = network === "mainnet" ? mainnetRpcConfigs : testnetRpcConfigs
     const activeIndex = network === "mainnet" ? activeMainnetRpcIndex : activeTestnetRpcIndex
     const setActiveIndex = network === "mainnet" ? setActiveMainnetRpcIndex : setActiveTestnetRpcIndex
     const lastHeightRef = network === "mainnet" ? lastMainnetHeightRef : lastTestnetHeightRef
     const issueCountRef = network === "mainnet" ? mainnetIssueCountRef : testnetIssueCountRef
-    const alertSentRef = network === "mainnet" ? mainnetFailoverAlertSentRef : testnetFailoverAlertSentRef
 
     if (rpcConfigs.length === 0) return 0
 
@@ -460,10 +415,6 @@ export function ValidatorDashboard() {
 
         if (isValidFallback) {
           console.log(`[Monadoring] ${network} switched to ${rpcConfigs[nextIndex].name} (height: ${fallbackHeight})`)
-          if (!alertSentRef.current) {
-            sendRpcAlert("rpc_failover", network, rpcConfigs[activeIndex].name, rpcConfigs[nextIndex].name, reason)
-            alertSentRef.current = true
-          }
           updateRpcDisplayState(network, activeIndex, nextIndex)
           setActiveIndex(nextIndex)
           lastHeightRef.current = fallbackHeight
@@ -477,11 +428,8 @@ export function ValidatorDashboard() {
 
     issueCountRef.current = 0
     lastHeightRef.current = height
-    if (activeIndex === 0) {
-      alertSentRef.current = false
-    }
     return height
-  }, [mainnetRpcConfigs, testnetRpcConfigs, activeMainnetRpcIndex, activeTestnetRpcIndex, sendRpcAlert, updateRpcDisplayState])
+  }, [mainnetRpcConfigs, testnetRpcConfigs, activeMainnetRpcIndex, activeTestnetRpcIndex, updateRpcDisplayState])
 
   const fetchData = useCallback(async () => {
     const mainnetIds = CONFIG.mainnetValidators.split(",").map(s => s.trim()).filter(Boolean)
@@ -591,31 +539,27 @@ export function ValidatorDashboard() {
         const primaryHeight = await fetchBlockHeight(mainnetRpcConfigs[0].url)
         if (primaryHeight > 0 && primaryHeight > lastMainnetHeightRef.current) {
           console.log(`[Monadoring] Mainnet primary recovered (height: ${primaryHeight}), switching back`)
-          sendRpcAlert("rpc_recovered", "mainnet", mainnetRpcConfigs[activeMainnetRpcIndex].name, mainnetRpcConfigs[0].name)
           updateRpcDisplayState("mainnet", activeMainnetRpcIndex, 0, true)
           setActiveMainnetRpcIndex(0)
           lastMainnetHeightRef.current = primaryHeight
           mainnetIssueCountRef.current = 0
-          mainnetFailoverAlertSentRef.current = false
         }
       }
       if (activeTestnetRpcIndex !== 0 && testnetRpcConfigs.length > 0) {
         const primaryHeight = await fetchBlockHeight(testnetRpcConfigs[0].url)
         if (primaryHeight > 0 && primaryHeight > lastTestnetHeightRef.current) {
           console.log(`[Monadoring] Testnet primary recovered (height: ${primaryHeight}), switching back`)
-          sendRpcAlert("rpc_recovered", "testnet", testnetRpcConfigs[activeTestnetRpcIndex].name, testnetRpcConfigs[0].name)
           updateRpcDisplayState("testnet", activeTestnetRpcIndex, 0, true)
           setActiveTestnetRpcIndex(0)
           lastTestnetHeightRef.current = primaryHeight
           testnetIssueCountRef.current = 0
-          testnetFailoverAlertSentRef.current = false
         }
       }
     }
 
     const interval = setInterval(checkPrimaryRecovery, PRIMARY_RECOVERY_INTERVAL)
     return () => clearInterval(interval)
-  }, [activeMainnetRpcIndex, activeTestnetRpcIndex, mainnetRpcConfigs, testnetRpcConfigs, sendRpcAlert, updateRpcDisplayState])
+  }, [activeMainnetRpcIndex, activeTestnetRpcIndex, mainnetRpcConfigs, testnetRpcConfigs, updateRpcDisplayState])
 
   useEffect(() => {
     let mounted = true
