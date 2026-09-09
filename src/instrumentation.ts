@@ -240,11 +240,20 @@ async function checkChainProgress(network: 'mainnet' | 'testnet'): Promise<boole
   }
 }
 
+// Consecutive bad checks (probe failure, lagging or stale height) before an RPC
+// counts as unhealthy. At the 1 minute check interval this tolerates ~3 minutes,
+// so a single slow probe no longer fires a failover alert.
+const RPC_FAIL_THRESHOLD = 3
+
+// Blocks an RPC may trail the best-responding RPC before it counts as lagging.
+// Monad blocks land roughly every 0.4s, so 50 blocks is ~20 seconds behind.
+const RPC_LAG_THRESHOLD = 50
+
 // Check RPC health and return block height (0 = offline/error)
 async function checkRpcHealth(url: string): Promise<number> {
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 5000)
+    const timeout = setTimeout(() => controller.abort(), 10000)
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -252,35 +261,50 @@ async function checkRpcHealth(url: string): Promise<number> {
       signal: controller.signal
     })
     clearTimeout(timeout)
+    if (!res.ok) {
+      console.warn(`[Monadoring] RPC probe ${url} returned HTTP ${res.status}`)
+      return 0
+    }
     const data = await res.json()
-    return data.result ? parseInt(data.result, 16) : 0
-  } catch {
+    const height = data.result ? parseInt(data.result, 16) : 0
+    return Number.isFinite(height) ? height : 0
+  } catch (err) {
+    const e = err as Error
+    console.warn(`[Monadoring] RPC probe ${url} failed: ${e?.name || 'Error'}: ${e?.message || 'unknown'}`)
     return 0
   }
 }
 
-// Check if RPC is healthy based on height progression
-function isRpcHealthy(url: string, currentHeight: number): boolean {
-  if (currentHeight === 0) return false // No response
-
+// Check if RPC is healthy. Three failure modes, all sharing one consecutive
+// strike counter (RPC_FAIL_THRESHOLD in a row = unhealthy):
+// - no response at all (probe timeout/error, height 0)
+// - lagging: more than RPC_LAG_THRESHOLD blocks behind the best RPC this round
+// - stale: own height not advancing between checks (catches a halted chain
+//   even when every RPC reports the same stuck height)
+function isRpcHealthy(url: string, currentHeight: number, bestHeight: number): boolean {
   const prev = rpcHeights.get(url)
-  if (!prev) {
-    // First check - just record height
+
+  if (currentHeight === 0) {
+    // No response - can't measure lag, count the miss and keep last known height
+    const strikes = (prev?.staleCount ?? 0) + 1
+    rpcHeights.set(url, { height: prev?.height ?? 0, staleCount: strikes })
+    return strikes < RPC_FAIL_THRESHOLD
+  }
+
+  const lag = bestHeight - currentHeight
+  const advanced = !prev || currentHeight > prev.height
+
+  if (lag <= RPC_LAG_THRESHOLD && advanced) {
     rpcHeights.set(url, { height: currentHeight, staleCount: 0 })
     return true
   }
 
-  if (currentHeight > prev.height) {
-    // Height increased - healthy
-    rpcHeights.set(url, { height: currentHeight, staleCount: 0 })
-    return true
-  } else {
-    // Height stale - increment counter
-    const newStaleCount = prev.staleCount + 1
-    rpcHeights.set(url, { height: currentHeight, staleCount: newStaleCount })
-    // Consider unhealthy after 2 consecutive stale checks (2 minutes)
-    return newStaleCount < 2
+  const strikes = (prev?.staleCount ?? 0) + 1
+  rpcHeights.set(url, { height: currentHeight, staleCount: strikes })
+  if (lag > RPC_LAG_THRESHOLD) {
+    console.warn(`[Monadoring] RPC ${url} lagging ${lag} blocks behind best (${currentHeight} vs ${bestHeight}), strike ${strikes}/${RPC_FAIL_THRESHOLD}`)
   }
+  return strikes < RPC_FAIL_THRESHOLD
 }
 
 // Alert when the active RPC fails, and again when the primary comes back.
@@ -346,11 +370,10 @@ async function checkNetworkRpcs(network: 'mainnet' | 'testnet') {
   const rpcs = parseRpcConfig(configured || '')
   if (rpcs.length === 0) return
 
-  const healthy: boolean[] = []
-  for (const rpc of rpcs) {
-    const height = await checkRpcHealth(rpc.url)
-    healthy.push(isRpcHealthy(rpc.url, height))
-  }
+  // Probe every RPC first so lag can be judged against the best height this round
+  const heights = await Promise.all(rpcs.map(rpc => checkRpcHealth(rpc.url)))
+  const bestHeight = Math.max(...heights)
+  const healthy = rpcs.map((rpc, i) => isRpcHealthy(rpc.url, heights[i], bestHeight))
 
   await checkRpcFailover(network, rpcs, healthy)
 
