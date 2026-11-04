@@ -100,7 +100,8 @@ pm2 save
 # (Optional) Enable PM2 startup on boot
 pm2 startup
 
-# Dashboard available at http://localhost:3030
+# Dashboard available at http://localhost:3030 (this host only).
+# To serve it publicly, put a reverse proxy (Caddy, nginx) in front.
 ```
 
 **Useful PM2 Commands:**
@@ -126,7 +127,8 @@ nano .env  # Edit your configuration
 # Start with Docker
 docker compose up -d
 
-# Dashboard available at http://localhost:3030
+# Dashboard available at http://localhost:3030 (this host only).
+# To serve it publicly, put a reverse proxy (Caddy, nginx) in front.
 ```
 
 ## Configuration
@@ -159,7 +161,8 @@ RPC_ALERTS=off
 # SERVER (Dashboard Port)
 # ============================================
 PORT=3030
-HOST=0.0.0.0
+# Listen address. Keep 127.0.0.1 and publish through a reverse proxy.
+HOSTNAME=127.0.0.1
 
 # ============================================
 # TELEGRAM ALERTS (Optional)
@@ -195,10 +198,11 @@ PAGERDUTY_THRESHOLD=5
 |----------|----------|-------------|
 | `MAINNET_VALIDATORS` | ✅ | Validator ID(s) for Mainnet |
 | `TESTNET_VALIDATORS` | ❌ | Validator ID(s) for Testnet |
-| `MAINNET_RPCS` | ✅ | RPC endpoints for Mainnet |
+| `MAINNET_RPCS` | ✅ | RPC endpoints for Mainnet. Public endpoints only: the list is built into the dashboard and every visitor's browser calls it |
 | `TESTNET_RPCS` | ❌ | RPC endpoints for Testnet |
 | `RPC_ALERTS` | ❌ | RPC monitoring: offline/failover/all-down alerts (on/off, default: off) |
 | `PORT` | ❌ | Dashboard port (default: 3030) |
+| `HOSTNAME` | ❌ | Listen address (default in `.env.example`: 127.0.0.1) |
 | `TELEGRAM_BOT_TOKEN` | ❌ | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | ❌ | Telegram chat/group ID |
 | `DISCORD_WEBHOOK_URL` | ❌ | Discord webhook URL |

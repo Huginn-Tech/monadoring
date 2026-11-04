@@ -42,38 +42,56 @@ const activeRpcState: Record<'mainnet' | 'testnet', { index: number; failedOver:
 // Track last known block heights from Uptime API to detect chain progress
 let lastKnownHeight: { mainnet: number; testnet: number } = { mainnet: 0, testnet: 0 }
 
-async function getValidatorName(): Promise<string | undefined> {
-  const mainnetValidators = process.env.MAINNET_VALIDATORS || ''
-  const testnetValidators = process.env.TESTNET_VALIDATORS || ''
+const NAME_API = {
+  mainnet: 'https://validator-api.huginn.tech/monad-api',
+  testnet: 'https://validator-api-testnet.huginn.tech/monad-api'
+}
 
-  const firstMainnetId = mainnetValidators.split(',')[0]?.trim()
-  const firstTestnetId = testnetValidators.split(',')[0]?.trim()
+// Validator names come from an external API and end up inside Telegram
+// Markdown, Discord and Slack messages. Strip the characters that are markup
+// there, so a name can neither add links or mentions nor make Telegram
+// reject (and so silently drop) every alert that carries it.
+function sanitizeValidatorName(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const clean = raw
+    .replace(/[\u0000-\u001f\u007f*_`[\]()<>&|~\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 64)
+  return clean || undefined
+}
 
-  // Try to fetch validator name from API
-  const API = {
-    mainnet: 'https://validator-api.huginn.tech/monad-api',
-    testnet: 'https://validator-api-testnet.huginn.tech/monad-api'
-  }
+// Names per validator, so a second validator's alerts carry its own name.
+const validatorNames = new Map<string, string>()
+
+async function getValidatorName(network: 'mainnet' | 'testnet', validatorId: string): Promise<string | undefined> {
+  const key = `${network}:${validatorId}`
+  const cached = validatorNames.get(key)
+  if (cached) return cached
 
   try {
-    if (firstMainnetId) {
-      const res = await fetch(`${API.mainnet}/validator/uptime/${firstMainnetId}/history?limit=1`)
-      const data = await res.json()
-      if (data.success && data.validator_name) {
-        return data.validator_name
-      }
-    }
-    if (firstTestnetId) {
-      const res = await fetch(`${API.testnet}/validator/uptime/${firstTestnetId}/history?limit=1`)
-      const data = await res.json()
-      if (data.success && data.validator_name) {
-        return data.validator_name
-      }
-    }
+    const res = await fetch(`${NAME_API[network]}/validator/uptime/${encodeURIComponent(validatorId)}/history?limit=1`, {
+      signal: AbortSignal.timeout(5000)
+    })
+    const data = await res.json()
+    const name = data?.success ? sanitizeValidatorName(data.validator_name) : undefined
+    if (name) validatorNames.set(key, name)
+    return name
   } catch (error) {
-    console.error('[Monadoring] Failed to fetch validator name:', error)
+    console.error(`[Monadoring] Failed to fetch validator name for ${key}:`, error)
+    return undefined
   }
+}
 
+// Name for the startup/shutdown messages: the first configured validator.
+async function getPrimaryValidatorName(): Promise<string | undefined> {
+  const firstMainnetId = (process.env.MAINNET_VALIDATORS || '').split(',')[0]?.trim()
+  const firstTestnetId = (process.env.TESTNET_VALIDATORS || '').split(',')[0]?.trim()
+  if (firstMainnetId) {
+    const name = await getValidatorName('mainnet', firstMainnetId)
+    if (name) return name
+  }
+  if (firstTestnetId) return getValidatorName('testnet', firstTestnetId)
   return undefined
 }
 
@@ -92,7 +110,7 @@ async function getAlertConfig() {
 
   const port = process.env.PORT || '3030'
   const dashboardUrl = `http://localhost:${port}`
-  const validatorName = await getValidatorName()
+  const validatorName = await getPrimaryValidatorName()
 
   // Alert status for notification display
   const alertStatus = {
@@ -669,14 +687,14 @@ async function runMissedBlockCheck() {
 
   // Check mainnet validators
   for (const validatorId of mainnetValidators) {
-    const name = cachedConfig.validatorName || validatorId
+    const name = (await getValidatorName('mainnet', validatorId)) || validatorId
     await checkValidatorMissedBlocks(validatorId, 'mainnet', name)
     await checkValidatorStatus(validatorId, 'mainnet', name, mainnetEpoch)
   }
 
   // Check testnet validators
   for (const validatorId of testnetValidators) {
-    const name = cachedConfig.validatorName || validatorId
+    const name = (await getValidatorName('testnet', validatorId)) || validatorId
     await checkValidatorMissedBlocks(validatorId, 'testnet', name)
     await checkValidatorStatus(validatorId, 'testnet', name, testnetEpoch)
   }
