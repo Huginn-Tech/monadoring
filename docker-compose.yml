@@ -30,6 +30,8 @@ services:
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
       - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
       - PAGERDUTY_THRESHOLD=${PAGERDUTY_THRESHOLD:-5}
+      - PAGERDUTY_NETWORKS=${PAGERDUTY_NETWORKS:-mainnet}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3030"]
       interval: 30s

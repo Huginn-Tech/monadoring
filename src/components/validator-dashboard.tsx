@@ -57,6 +57,18 @@ const CONFIG = {
 }
 
 // ============ CONSTANTS ============
+// The RPC a browser last used, if it still exists in the configured list
+// (the list can shrink after a redeploy) and storage is readable at all.
+function readSavedRpcIndex(key: string, count: number): number {
+  if (typeof window === 'undefined') return 0
+  try {
+    const saved = Number.parseInt(window.localStorage.getItem(key) ?? '', 10)
+    return Number.isInteger(saved) && saved >= 0 && saved < count ? saved : 0
+  } catch {
+    return 0
+  }
+}
+
 const DISPLAY_BLOCKS = 50
 const RPC_CHECK_INTERVAL = 600000 // 10 minutes - for secondary RPCs liveliness check
 const DATA_POLL_INTERVAL = 2000 // 2 seconds - for primary RPC height polling
@@ -275,20 +287,12 @@ export function ValidatorDashboard() {
   const mainnetRpcConfigs = useMemo(() => parseRpcConfig(CONFIG.mainnetRpcs), [])
   const testnetRpcConfigs = useMemo(() => parseRpcConfig(CONFIG.testnetRpcs), [])
 
-  const [activeMainnetRpcIndex, setActiveMainnetRpcIndex] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('monadoring_mainnet_rpc')
-      return saved ? parseInt(saved, 10) : 0
-    }
-    return 0
-  })
-  const [activeTestnetRpcIndex, setActiveTestnetRpcIndex] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('monadoring_testnet_rpc')
-      return saved ? parseInt(saved, 10) : 0
-    }
-    return 0
-  })
+  const [activeMainnetRpcIndex, setActiveMainnetRpcIndex] = useState(() =>
+    readSavedRpcIndex('monadoring_mainnet_rpc', mainnetRpcConfigs.length)
+  )
+  const [activeTestnetRpcIndex, setActiveTestnetRpcIndex] = useState(() =>
+    readSavedRpcIndex('monadoring_testnet_rpc', testnetRpcConfigs.length)
+  )
 
   useEffect(() => {
     if (typeof window !== 'undefined') {

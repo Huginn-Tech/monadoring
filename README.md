@@ -48,7 +48,7 @@ Get instant notifications for every missed block across Telegram, Discord, and S
 <details>
 <summary><strong>📟 PagerDuty Integration(Optional)</strong></summary>
 <br>
-Automatically triggers a call when <strong>5 or more consecutive blocks</strong> are missed. Threshold is configurable via <code>.env</code> file.
+Opens an incident when a validator misses <strong>5 or more consecutive rounds</strong> and resolves it when the validator finalizes again. Mainnet only by default; threshold and networks are configurable in the <code>.env</code> file.
 </details>
 
 <details>
@@ -69,7 +69,7 @@ Supports both Mainnet and Testnet.
 
 ## Quick Start
 
-**Requirements:** Node.js 20+ and npm
+**Requirements:** Node.js 22+ and npm
 
 ### Option 1: PM2 (Recommended)
 
@@ -189,7 +189,11 @@ SLACK_WEBHOOK_URL=
 # ============================================
 # Get routing key from PagerDuty service integration
 PAGERDUTY_ROUTING_KEY=
+# Consecutive missed rounds that open an incident; it resolves when the
+# validator finalizes again
 PAGERDUTY_THRESHOLD=5
+# Networks that page (comma-separated); testnet misses only go to chat
+PAGERDUTY_NETWORKS=mainnet
 ```
 
 ### Configuration Details
@@ -209,6 +213,7 @@ PAGERDUTY_THRESHOLD=5
 | `SLACK_WEBHOOK_URL` | ❌ | Slack Incoming Webhook URL |
 | `PAGERDUTY_ROUTING_KEY` | ❌ | PagerDuty routing key |
 | `PAGERDUTY_THRESHOLD` | ❌ | Consecutive misses before PagerDuty alert (default: 5) |
+| `PAGERDUTY_NETWORKS` | ❌ | Networks that page, comma-separated (default: mainnet) |
 
 
 ## License
