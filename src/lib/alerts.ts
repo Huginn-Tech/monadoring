@@ -79,9 +79,13 @@ export async function sendTelegramRpcAlert(
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
       })
     })
+    if (!res.ok) {
+      console.error('[Monadoring] Telegram rejected an alert:', res.status, await res.text().catch(() => ''))
+    }
     return res.ok
   } catch (error) {
     console.error('Telegram RPC alert failed:', error)
@@ -285,7 +289,8 @@ export async function sendTelegramLifecycle(
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
       })
     })
     if (!res.ok) {
@@ -466,9 +471,13 @@ export async function sendTelegramStatusChange(
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
       })
     })
+    if (!res.ok) {
+      console.error('[Monadoring] Telegram rejected an alert:', res.status, await res.text().catch(() => ''))
+    }
     return res.ok
   } catch (error) {
     console.error('Telegram status change alert failed:', error)
@@ -580,9 +589,13 @@ export async function sendTelegramAlert(
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
       })
     })
+    if (!res.ok) {
+      console.error('[Monadoring] Telegram rejected an alert:', res.status, await res.text().catch(() => ''))
+    }
     return res.ok
   } catch (error) {
     console.error('Telegram alert failed:', error)

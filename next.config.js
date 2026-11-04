@@ -2,9 +2,8 @@
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
-  experimental: {
-    instrumentationHook: true,
-  },
+  // Nothing uses next/image; keep the optimizer endpoint inert.
+  images: { unoptimized: true },
   // Expose server env vars to client (no NEXT_PUBLIC_ prefix needed)
   env: {
     MAINNET_VALIDATORS: process.env.MAINNET_VALIDATORS,

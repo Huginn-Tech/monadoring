@@ -1,5 +1,5 @@
 # Build stage
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -9,14 +9,24 @@ COPY package*.json ./
 # Install dependencies
 RUN npm ci
 
-# Copy source files
+# Values the dashboard bundle is built with (see docker-compose.yml)
+ARG MAINNET_VALIDATORS
+ARG TESTNET_VALIDATORS
+ARG MAINNET_RPCS
+ARG TESTNET_RPCS
+ENV MAINNET_VALIDATORS=$MAINNET_VALIDATORS \
+    TESTNET_VALIDATORS=$TESTNET_VALIDATORS \
+    MAINNET_RPCS=$MAINNET_RPCS \
+    TESTNET_RPCS=$TESTNET_RPCS
+
+# Copy source files (.dockerignore keeps .env and secrets out)
 COPY . .
 
 # Build application
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 
