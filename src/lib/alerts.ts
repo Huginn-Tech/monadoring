@@ -45,6 +45,38 @@ interface StatusChangePayload {
   epoch?: number
 }
 
+const SEND_TIMEOUT_MS = 10_000
+
+// One Telegram send: link previews off, a single retry when Telegram asks us
+// to slow down (429 retry_after, capped), and every rejection logged with
+// Telegram's reason so a dropped alert never goes unnoticed.
+async function telegramSend(botToken: string, chatId: string, text: string, label: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true }),
+        signal: AbortSignal.timeout(SEND_TIMEOUT_MS)
+      })
+      if (res.ok) return true
+      const body = await res.json().catch(() => ({})) as { description?: string; parameters?: { retry_after?: number } }
+      const retryAfter = body.parameters?.retry_after
+      if (res.status === 429 && attempt === 0 && retryAfter !== undefined && retryAfter <= 30) {
+        console.warn(`[Monadoring] ${label}: Telegram rate limit, retrying in ${retryAfter}s`)
+        await new Promise((r) => setTimeout(r, retryAfter * 1000))
+        continue
+      }
+      console.error(`[Monadoring] ${label}: Telegram rejected the message (${res.status}): ${body.description ?? 'no reason'}`)
+      return false
+    } catch (error) {
+      console.error(`[Monadoring] ${label} failed:`, error)
+      return false
+    }
+  }
+  return false
+}
+
 // RPC Telegram Alert
 export async function sendTelegramRpcAlert(
   botToken: string,
@@ -72,25 +104,7 @@ export async function sendTelegramRpcAlert(
     message = `${emoji} *RPC ${status}*\n\n*Network:* ${network}\n*Type:* ${rpcType}\n*URL:* \`${payload.rpcUrl}\`\n\n_Monadoring RPC Alert_`
   }
 
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true
-      })
-    })
-    if (!res.ok) {
-      console.error('[Monadoring] Telegram rejected an alert:', res.status, await res.text().catch(() => ''))
-    }
-    return res.ok
-  } catch (error) {
-    console.error('Telegram RPC alert failed:', error)
-    return false
-  }
+  return telegramSend(botToken, chatId, message, 'Telegram RPC alert')
 }
 
 // RPC Discord Alert
@@ -136,6 +150,7 @@ export async function sendDiscordRpcAlert(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(embed)
     })
@@ -220,6 +235,7 @@ export async function sendSlackRpcAlert(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         attachments: [{ color, blocks }]
@@ -282,26 +298,7 @@ export async function sendTelegramLifecycle(
     ? `🟢 *Monadoring* is now *online*${validatorPart}${dashboardPart}\n_Observing validator uptime_${alertStatusPart}`
     : `🔴 *Monadoring* is now *offline*${validatorPart}`
 
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true
-      })
-    })
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({}))
-      console.error('Telegram API error:', res.status, errorData)
-    }
-    return res.ok
-  } catch (error) {
-    console.error('Telegram lifecycle alert failed:', error)
-    return false
-  }
+  return telegramSend(botToken, chatId, message, 'Telegram lifecycle alert')
 }
 
 // Lifecycle Discord Notification
@@ -330,6 +327,7 @@ export async function sendDiscordLifecycle(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(embed)
     })
@@ -395,6 +393,7 @@ export async function sendSlackLifecycle(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         attachments: [{ color, blocks }]
@@ -464,25 +463,7 @@ export async function sendTelegramStatusChange(
 
   const message = `${emoji} ${network} validator *${payload.validator}* now in *${payload.status}* set${epochPart}`
 
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true
-      })
-    })
-    if (!res.ok) {
-      console.error('[Monadoring] Telegram rejected an alert:', res.status, await res.text().catch(() => ''))
-    }
-    return res.ok
-  } catch (error) {
-    console.error('Telegram status change alert failed:', error)
-    return false
-  }
+  return telegramSend(botToken, chatId, message, 'Telegram status change alert')
 }
 
 // Validator set status change (active <-> inactive) - Discord
@@ -511,6 +492,7 @@ export async function sendDiscordStatusChange(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(embed)
     })
@@ -538,6 +520,7 @@ export async function sendSlackStatusChange(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         attachments: [{
@@ -582,25 +565,7 @@ export async function sendTelegramAlert(
 • Network: ${network}${streakLine}`
   }
 
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true
-      })
-    })
-    if (!res.ok) {
-      console.error('[Monadoring] Telegram rejected an alert:', res.status, await res.text().catch(() => ''))
-    }
-    return res.ok
-  } catch (error) {
-    console.error('Telegram alert failed:', error)
-    return false
-  }
+  return telegramSend(botToken, chatId, message, 'Telegram alert')
 }
 
 // Discord Alert
@@ -641,6 +606,7 @@ export async function sendDiscordAlert(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(embed)
     })
@@ -695,6 +661,7 @@ export async function sendSlackAlert(
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     })
@@ -705,10 +672,12 @@ export async function sendSlackAlert(
   }
 }
 
-// PagerDuty Alert
+// PagerDuty Alert: "missed" triggers, "recovered" resolves the same incident.
+// dedupKey ties the two together; use a stable id (not a display name).
 export async function sendPagerDutyAlert(
   routingKey: string,
-  payload: AlertPayload
+  payload: AlertPayload,
+  dedupKey = `monadoring-${payload.validator}-${payload.network}`
 ): Promise<boolean> {
   if (!routingKey) return false
 
@@ -718,9 +687,11 @@ export async function sendPagerDutyAlert(
   const event = {
     routing_key: routingKey,
     event_action: action,
-    dedup_key: `monadoring-${payload.validator}-${payload.network}`,
+    dedup_key: dedupKey,
     payload: {
-      summary: `${payload.type === 'missed' ? 'Missed block' : 'Recovered'}: ${payload.validator} on ${payload.network}`,
+      summary: payload.type === 'missed'
+        ? `${payload.consecutiveMisses ?? 1} missed rounds in a row: ${payload.validator} on ${payload.network}`
+        : `Recovered: ${payload.validator} on ${payload.network}`,
       severity,
       source: 'Monadoring',
       custom_details: {
@@ -737,110 +708,15 @@ export async function sendPagerDutyAlert(
     const res = await fetch('https://events.pagerduty.com/v2/enqueue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(event)
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS)
     })
+    if (!res.ok) {
+      console.error(`[Monadoring] PagerDuty ${action} rejected (${res.status}):`, await res.text().catch(() => ''))
+    }
     return res.ok
   } catch (error) {
-    console.error('PagerDuty alert failed:', error)
+    console.error(`[Monadoring] PagerDuty ${action} failed:`, error)
     return false
-  }
-}
-
-// Alert Manager
-interface AlertManagerConfig {
-  telegram?: { botToken: string; chatId: string }
-  discord?: { webhookUrl: string }
-  slack?: { webhookUrl: string }
-  pagerduty?: { routingKey: string; threshold: number }
-}
-
-export class AlertManager {
-  private config: AlertManagerConfig
-  private consecutiveMisses: Map<string, number> = new Map()
-  private pagerdutyTriggered: Map<string, boolean> = new Map()
-
-  constructor(config: AlertManagerConfig) {
-    this.config = config
-  }
-
-  private getKey(validator: string, network: string): string {
-    return `${validator}-${network}`
-  }
-
-  async handleMissedBlock(
-    validator: string,
-    network: 'mainnet' | 'testnet',
-    height: number | null,
-    round: number
-  ): Promise<void> {
-    const key = this.getKey(validator, network)
-    const misses = (this.consecutiveMisses.get(key) || 0) + 1
-    this.consecutiveMisses.set(key, misses)
-
-    const payload: AlertPayload = {
-      validator,
-      network,
-      height,
-      round,
-      type: 'missed',
-      consecutiveMisses: misses
-    }
-
-    // Telegram: Alert on every miss
-    if (this.config.telegram) {
-      await sendTelegramAlert(
-        this.config.telegram.botToken,
-        this.config.telegram.chatId,
-        payload
-      )
-    }
-
-    // Discord: Alert on every miss
-    if (this.config.discord) {
-      await sendDiscordAlert(this.config.discord.webhookUrl, payload)
-    }
-
-    // Slack: Alert on every miss
-    if (this.config.slack) {
-      await sendSlackAlert(this.config.slack.webhookUrl, payload)
-    }
-
-    // PagerDuty: Alert after threshold
-    if (this.config.pagerduty && misses >= this.config.pagerduty.threshold) {
-      if (!this.pagerdutyTriggered.get(key)) {
-        await sendPagerDutyAlert(this.config.pagerduty.routingKey, payload)
-        this.pagerdutyTriggered.set(key, true)
-      }
-    }
-  }
-
-  async handleRecovery(
-    validator: string,
-    network: 'mainnet' | 'testnet',
-    height: number | null,
-    round: number
-  ): Promise<void> {
-    const key = this.getKey(validator, network)
-    const hadMisses = (this.consecutiveMisses.get(key) || 0) > 0
-
-    if (hadMisses) {
-      const previousStreak = this.consecutiveMisses.get(key) || 0
-      this.consecutiveMisses.set(key, 0)
-
-      const payload: AlertPayload = {
-        validator,
-        network,
-        height,
-        round,
-        type: 'recovered',
-        previousStreak
-      }
-
-      // PagerDuty: Resolve incident
-      if (this.config.pagerduty && this.pagerdutyTriggered.get(key)) {
-        await sendPagerDutyAlert(this.config.pagerduty.routingKey, payload)
-        this.pagerdutyTriggered.set(key, false)
-      }
-    }
   }
 }

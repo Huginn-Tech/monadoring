@@ -1,7 +1,7 @@
 // Next.js Instrumentation - runs on server startup
 // https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 
-import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendSlackAlert, sendTelegramStatusChange, sendDiscordStatusChange, sendSlackStatusChange } from '@/lib/alerts'
+import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendSlackAlert, sendTelegramStatusChange, sendDiscordStatusChange, sendSlackStatusChange, sendPagerDutyAlert } from '@/lib/alerts'
 import { parseRpcConfig } from '@/lib/api'
 
 let shutdownHandlersRegistered = false
@@ -13,7 +13,31 @@ interface ValidatorBlockState {
   lastStatus: 'finalized' | 'timeout'
   consecutiveMisses: number
   alertedForMiss: boolean
+  /** When lastRound last moved; bounds how far the next round may jump. */
+  roundAt: number
+  /** A PagerDuty incident is open for this validator. */
+  pagerdutyTriggered: boolean
 }
+
+function isTimeout(err: unknown): boolean {
+  const name = (err as Error)?.name
+  return name === 'AbortError' || name === 'TimeoutError'
+}
+
+// A check that outlives its interval is skipped, not stacked: overlapping runs
+// read the same state and would send the same alert twice.
+function runExclusive(label: string, busy: { running: boolean }, fn: () => Promise<void>) {
+  if (busy.running) {
+    console.warn(`[Monadoring] ${label} still running, skipping this tick`)
+    return
+  }
+  busy.running = true
+  fn()
+    .catch((err) => console.error(`[Monadoring] ${label} error:`, err))
+    .finally(() => { busy.running = false })
+}
+const missedBlockCheckBusy = { running: false }
+const rpcHealthCheckBusy = { running: false }
 const validatorBlockStates: Map<string, ValidatorBlockState> = new Map()
 
 // Track validator active/inactive set membership
@@ -230,12 +254,9 @@ async function checkChainProgress(network: 'mainnet' | 'testnet'): Promise<boole
   }
 
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 5000)
     const res = await fetch(`${API[network]}/validator/uptime/${firstValidatorId}`, {
-      signal: controller.signal
+      signal: AbortSignal.timeout(5000)
     })
-    clearTimeout(timeout)
 
     if (!res.ok) return false
     const data = await res.json()
@@ -270,15 +291,12 @@ const RPC_LAG_THRESHOLD = 50
 // Check RPC health and return block height (0 = offline/error)
 async function checkRpcHealth(url: string): Promise<number> {
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}',
-      signal: controller.signal
+      signal: AbortSignal.timeout(10000)
     })
-    clearTimeout(timeout)
     if (!res.ok) {
       console.warn(`[Monadoring] RPC probe ${url} returned HTTP ${res.status}`)
       return 0
@@ -296,7 +314,7 @@ async function checkRpcHealth(url: string): Promise<number> {
 // Check if RPC is healthy. Three failure modes, all sharing one consecutive
 // strike counter (RPC_FAIL_THRESHOLD in a row = unhealthy):
 // - no response at all (probe timeout/error, height 0)
-// - lagging: more than RPC_LAG_THRESHOLD blocks behind the best RPC this round
+// - lagging: more than RPC_LAG_THRESHOLD blocks behind the median RPC this round
 // - stale: own height not advancing between checks (catches a halted chain
 //   even when every RPC reports the same stuck height)
 function isRpcHealthy(url: string, currentHeight: number, bestHeight: number): boolean {
@@ -320,7 +338,7 @@ function isRpcHealthy(url: string, currentHeight: number, bestHeight: number): b
   const strikes = (prev?.staleCount ?? 0) + 1
   rpcHeights.set(url, { height: currentHeight, staleCount: strikes })
   if (lag > RPC_LAG_THRESHOLD) {
-    console.warn(`[Monadoring] RPC ${url} lagging ${lag} blocks behind best (${currentHeight} vs ${bestHeight}), strike ${strikes}/${RPC_FAIL_THRESHOLD}`)
+    console.warn(`[Monadoring] RPC ${url} lagging ${lag} blocks behind the median (${currentHeight} vs ${bestHeight}), strike ${strikes}/${RPC_FAIL_THRESHOLD}`)
   }
   return strikes < RPC_FAIL_THRESHOLD
 }
@@ -380,6 +398,15 @@ async function checkRpcFailover(
   // Nothing healthy to switch to - the all-offline check reports that case
 }
 
+// Lag is measured against the median height of the RPCs that answered (the
+// upper median for an even count), so one RPC reporting an inflated height
+// cannot make every honest RPC look behind and trigger failover alerts.
+function referenceHeight(heights: number[]): number {
+  const answered = heights.filter((h) => h > 0).sort((a, b) => a - b)
+  if (answered.length === 0) return 0
+  return answered[Math.floor(answered.length / 2)]
+}
+
 // Check one network's RPCs: failover/recovery alerts plus all-offline detection
 async function checkNetworkRpcs(network: 'mainnet' | 'testnet') {
   if (!cachedConfig) return
@@ -390,8 +417,8 @@ async function checkNetworkRpcs(network: 'mainnet' | 'testnet') {
 
   // Probe every RPC first so lag can be judged against the best height this round
   const heights = await Promise.all(rpcs.map(rpc => checkRpcHealth(rpc.url)))
-  const bestHeight = Math.max(...heights)
-  const healthy = rpcs.map((rpc, i) => isRpcHealthy(rpc.url, heights[i], bestHeight))
+  const reference = referenceHeight(heights)
+  const healthy = rpcs.map((rpc, i) => isRpcHealthy(rpc.url, heights[i], reference))
 
   await checkRpcFailover(network, rpcs, healthy)
 
@@ -443,20 +470,93 @@ function startRpcHealthMonitoring() {
 
   // First check after 30 seconds
   setTimeout(() => {
-    runRpcHealthCheck().catch(err => {
-      console.error('[Monadoring] RPC health check error:', err)
-    })
+    runExclusive('RPC health check', rpcHealthCheckBusy, runRpcHealthCheck)
   }, 30 * 1000) // 30 seconds
 
   // Run health check every 1 minute
   rpcHealthCheckInterval = setInterval(() => {
-    runRpcHealthCheck().catch(err => {
-      console.error('[Monadoring] RPC health check error:', err)
-    })
+    runExclusive('RPC health check', rpcHealthCheckBusy, runRpcHealthCheck)
   }, 60 * 1000) // 1 minute
 }
 
 // Check validator for missed blocks
+
+const VALIDATOR_API = {
+  mainnet: 'https://validator-api.huginn.tech/monad-api',
+  testnet: 'https://validator-api-testnet.huginn.tech/monad-api'
+}
+
+// Monad rounds advance about 2.5 per second. A round further ahead than this
+// rate allows since the last one seen is bad data from the API, not the chain,
+// and is ignored so it cannot push lastRound past every real event.
+const MAX_ROUNDS_PER_SECOND = 10
+// The newest round falling this far below the last one seen means a chain
+// reset (testnet) or a replaced API: the baseline starts over, without alerts.
+const ROUND_RESET_GAP = 100_000
+// Chat messages per validator per check. A run of misses in one check is one
+// message (its streak counts them); beyond this only the latest are sent.
+const MAX_ALERTS_PER_CHECK = 3
+
+// PagerDuty: page once a timeout streak reaches the threshold, resolve when the
+// validator finalizes again. Mainnet only unless PAGERDUTY_NETWORKS says more.
+const PAGERDUTY_THRESHOLD = Math.max(1, parseInt(process.env.PAGERDUTY_THRESHOLD || '5', 10) || 5)
+const PAGERDUTY_NETWORKS = new Set(
+  (process.env.PAGERDUTY_NETWORKS || 'mainnet').split(',').map((n) => n.trim().toLowerCase()).filter(Boolean)
+)
+
+type HistoryEvent = { round: number; height: number | null; status: 'finalized' | 'timeout' }
+type ValidatorAlert = Parameters<typeof sendTelegramAlert>[2]
+
+// Keep only well-formed events: safe-integer rounds and a known status.
+function validHistory(raw: unknown): HistoryEvent[] {
+  if (!Array.isArray(raw)) return []
+  const out: HistoryEvent[] = []
+  for (const e of raw as Array<Record<string, unknown> | null>) {
+    if (!e || typeof e !== 'object') continue
+    const { round, height, status } = e
+    if (typeof round !== 'number' || !Number.isSafeInteger(round) || round < 0) continue
+    if (status !== 'finalized' && status !== 'timeout') continue
+    out.push({ round, height: typeof height === 'number' && Number.isSafeInteger(height) ? height : null, status })
+  }
+  return out
+}
+
+async function sendValidatorAlert(payload: ValidatorAlert) {
+  if (!cachedConfig) return
+  if (cachedConfig.telegram) {
+    await sendTelegramAlert(cachedConfig.telegram.botToken, cachedConfig.telegram.chatId, payload)
+  }
+  if (cachedConfig.discord) {
+    await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
+  }
+  if (cachedConfig.slack) {
+    await sendSlackAlert(cachedConfig.slack.webhookUrl, payload)
+  }
+}
+
+async function updatePagerDuty(
+  validatorId: string,
+  network: 'mainnet' | 'testnet',
+  validatorName: string,
+  state: ValidatorBlockState,
+  height: number | null
+) {
+  const routingKey = process.env.PAGERDUTY_ROUTING_KEY
+  if (!routingKey || !PAGERDUTY_NETWORKS.has(network)) return
+  const dedupKey = `monadoring-${network}-${validatorId}`
+  const base = { validator: validatorName, network, height, round: state.lastRound }
+
+  if (!state.pagerdutyTriggered && state.consecutiveMisses >= PAGERDUTY_THRESHOLD) {
+    console.log(`[Monadoring] 📟 PagerDuty trigger: ${validatorName} ${network} streak ${state.consecutiveMisses}`)
+    const ok = await sendPagerDutyAlert(routingKey, { ...base, type: 'missed', consecutiveMisses: state.consecutiveMisses }, dedupKey)
+    if (ok) state.pagerdutyTriggered = true // on failure the next check retries
+  } else if (state.pagerdutyTriggered && state.consecutiveMisses === 0) {
+    console.log(`[Monadoring] 📟 PagerDuty resolve: ${validatorName} ${network}`)
+    const ok = await sendPagerDutyAlert(routingKey, { ...base, type: 'recovered' }, dedupKey)
+    if (ok) state.pagerdutyTriggered = false
+  }
+}
+
 async function checkValidatorMissedBlocks(
   validatorId: string,
   network: 'mainnet' | 'testnet',
@@ -464,51 +564,54 @@ async function checkValidatorMissedBlocks(
 ) {
   if (!cachedConfig) return
 
-  const API = {
-    mainnet: 'https://validator-api.huginn.tech/monad-api',
-    testnet: 'https://validator-api-testnet.huginn.tech/monad-api'
-  }
-
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15000)
-    const res = await fetch(`${API[network]}/validator/uptime/${validatorId}/history?limit=20`, {
-      signal: controller.signal
+    const res = await fetch(`${VALIDATOR_API[network]}/validator/uptime/${encodeURIComponent(validatorId)}/history?limit=20`, {
+      signal: AbortSignal.timeout(15000)
     })
-    clearTimeout(timeout)
-
     if (!res.ok) return
 
     const data = await res.json()
-    if (!data.success || !data.history || data.history.length === 0) return
+    if (!data?.success) return
+    const history = validHistory(data.history)
+    if (history.length === 0) return
 
     const key = `${validatorId}-${network}`
     const prevState = validatorBlockStates.get(key)
     const networkLabel = network.charAt(0).toUpperCase() + network.slice(1)
+    const now = Date.now()
+    const latest = history.reduce((a, b) => (b.round > a.round ? b : a))
 
-    // Initialize state on first run without alerting on backlog
-    if (!prevState) {
-      const latestBlock = data.history[0]
-      const emoji = latestBlock.status === 'timeout' ? '🛑' : '🧊'
-      const label = latestBlock.status === 'timeout' ? 'Missed' : 'Finalized'
-      console.log(`[Monadoring] ${emoji} ${validatorName} ${networkLabel} ~ ${label} round ${latestBlock.round}`)
+    // First run, or a reset: take the newest event as the baseline, no alerts
+    const resetDetected = prevState !== undefined && latest.round < prevState.lastRound - ROUND_RESET_GAP
+    if (!prevState || resetDetected) {
+      if (resetDetected) {
+        console.warn(`[Monadoring] ${validatorName} ${networkLabel} rounds went back from ${prevState!.lastRound} to ${latest.round}; starting over`)
+      }
+      const emoji = latest.status === 'timeout' ? '🛑' : '🧊'
+      const label = latest.status === 'timeout' ? 'Missed' : 'Finalized'
+      console.log(`[Monadoring] ${emoji} ${validatorName} ${networkLabel} ~ ${label} round ${latest.round}`)
       validatorBlockStates.set(key, {
-        lastRound: latestBlock.round,
-        lastStatus: latestBlock.status,
-        consecutiveMisses: latestBlock.status === 'timeout' ? 1 : 0,
-        alertedForMiss: false
+        lastRound: latest.round,
+        lastStatus: latest.status,
+        consecutiveMisses: latest.status === 'timeout' ? 1 : 0,
+        alertedForMiss: false,
+        roundAt: now,
+        pagerdutyTriggered: prevState?.pagerdutyTriggered ?? false
       })
       return
     }
 
-    // Collect every event newer than last seen round, oldest first
-    const newEvents = (data.history as Array<{ round: number; height: number | null; status: 'finalized' | 'timeout' }>)
-      .filter((e) => e.round > prevState.lastRound)
-      .sort((a, b) => a.round - b.round)
+    // Every event newer than the last seen round, oldest first, within the
+    // rate the chain can actually move
+    const maxRound = prevState.lastRound + Math.ceil(((now - prevState.roundAt) / 1000 + 60) * MAX_ROUNDS_PER_SECOND)
+    const newer = history.filter((e) => e.round > prevState.lastRound).sort((a, b) => a.round - b.round)
+    const newEvents = newer.filter((e) => e.round <= maxRound)
+    if (newEvents.length < newer.length) {
+      console.warn(`[Monadoring] ${validatorName} ${networkLabel}: ignoring ${newer.length - newEvents.length} event(s) beyond round ${maxRound} (last seen ${prevState.lastRound})`)
+    }
 
-    if (newEvents.length === 0) return
-
-    const state = { ...prevState }
+    const state: ValidatorBlockState = { ...prevState }
+    const alerts: ValidatorAlert[] = []
 
     for (const ev of newEvents) {
       if (ev.status === 'timeout') {
@@ -519,23 +622,19 @@ async function checkValidatorMissedBlocks(
 
         console.log(`[Monadoring] 🛑 ${validatorName} ${networkLabel} ~ Missed round ${ev.round} (streak: ${state.consecutiveMisses})`)
 
-        const payload = {
+        const payload: ValidatorAlert = {
           validator: validatorName,
           network,
           height: ev.height,
           round: ev.round,
-          type: 'missed' as const,
+          type: 'missed',
           consecutiveMisses: state.consecutiveMisses
         }
-
-        if (cachedConfig.telegram) {
-          await sendTelegramAlert(cachedConfig.telegram.botToken, cachedConfig.telegram.chatId, payload)
-        }
-        if (cachedConfig.discord) {
-          await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
-        }
-        if (cachedConfig.slack) {
-          await sendSlackAlert(cachedConfig.slack.webhookUrl, payload)
+        // A run of misses in one check becomes one message carrying the streak
+        if (alerts.length > 0 && alerts[alerts.length - 1].type === 'missed') {
+          alerts[alerts.length - 1] = payload
+        } else {
+          alerts.push(payload)
         }
       } else {
         const hadMisses = state.consecutiveMisses > 0 && state.alertedForMiss
@@ -548,34 +647,31 @@ async function checkValidatorMissedBlocks(
 
         if (hadMisses) {
           console.log(`[Monadoring] ✅ ${validatorName} ${networkLabel} ~ Recovered round ${ev.round} (streak was: ${previousStreak})`)
-
-          const payload = {
+          alerts.push({
             validator: validatorName,
             network,
             height: ev.height,
             round: ev.round,
-            type: 'recovered' as const,
+            type: 'recovered',
             previousStreak
-          }
-
-          if (cachedConfig.telegram) {
-            await sendTelegramAlert(cachedConfig.telegram.botToken, cachedConfig.telegram.chatId, payload)
-          }
-          if (cachedConfig.discord) {
-            await sendDiscordAlert(cachedConfig.discord.webhookUrl, payload)
-          }
-          if (cachedConfig.slack) {
-            await sendSlackAlert(cachedConfig.slack.webhookUrl, payload)
-          }
+          })
         } else {
           console.log(`[Monadoring] 🧊 ${validatorName} ${networkLabel} ~ Finalized round ${ev.round}`)
         }
       }
     }
+    if (newEvents.length > 0) state.roundAt = now
 
+    const toSend = alerts.slice(-MAX_ALERTS_PER_CHECK)
+    if (toSend.length < alerts.length) {
+      console.warn(`[Monadoring] ${validatorName} ${networkLabel}: ${alerts.length - toSend.length} older alert(s) in this check not sent, latest ${toSend.length} sent`)
+    }
+    for (const payload of toSend) await sendValidatorAlert(payload)
+
+    await updatePagerDuty(validatorId, network, validatorName, state, (newEvents.length > 0 ? newEvents[newEvents.length - 1].height : latest.height))
     validatorBlockStates.set(key, state)
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') return
+    if (isTimeout(err)) return
     console.error(`[Monadoring] Missed block check error for ${validatorId}:`, err)
   }
 }
@@ -595,12 +691,9 @@ async function checkValidatorStatus(
   }
 
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15000)
     const res = await fetch(`${API[network]}/validator/uptime/${validatorId}`, {
-      signal: controller.signal
+      signal: AbortSignal.timeout(15000)
     })
-    clearTimeout(timeout)
 
     if (!res.ok) return
 
@@ -646,7 +739,7 @@ async function checkValidatorStatus(
       await sendSlackStatusChange(cachedConfig.slack.webhookUrl, payload)
     }
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') return
+    if (isTimeout(err)) return
     console.error(`[Monadoring] Validator status check error for ${validatorId}:`, err)
   }
 }
@@ -658,10 +751,7 @@ async function fetchEpoch(network: 'mainnet' | 'testnet'): Promise<number | null
   }
 
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 15000)
-    const res = await fetch(`${API[network]}/staking/epoch`, { signal: controller.signal })
-    clearTimeout(timeout)
+    const res = await fetch(`${API[network]}/staking/epoch`, { signal: AbortSignal.timeout(15000) })
 
     if (!res.ok) return null
 
@@ -712,16 +802,12 @@ function startMissedBlockMonitoring() {
 
   // First check after 10 seconds
   setTimeout(() => {
-    runMissedBlockCheck().catch(err => {
-      console.error('[Monadoring] Missed block check error:', err)
-    })
+    runExclusive('Missed block check', missedBlockCheckBusy, runMissedBlockCheck)
   }, 10 * 1000)
 
   // Run check every 30 seconds
   missedBlockCheckInterval = setInterval(() => {
-    runMissedBlockCheck().catch(err => {
-      console.error('[Monadoring] Missed block check error:', err)
-    })
+    runExclusive('Missed block check', missedBlockCheckBusy, runMissedBlockCheck)
   }, 30 * 1000)
 }
 
