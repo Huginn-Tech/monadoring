@@ -38,11 +38,42 @@ interface RpcAlertPayload {
   chainProgressing?: boolean // true if uptime API shows new blocks
 }
 
+// Where a validator stands in the active set (set_state in the validator API):
+// joining and leaving are the next epoch's change seen ahead of time.
+export type SetState = 'active' | 'inactive' | 'joining' | 'leaving'
+
 interface StatusChangePayload {
   validator: string
   network: 'mainnet' | 'testnet'
-  status: 'active' | 'inactive'
+  status: SetState
+  /** The state before this change. */
+  previous?: SetState
   epoch?: number
+}
+
+// One line per change, shared by every channel; bold differs per channel.
+function statusChangeLine(
+  payload: StatusChangePayload,
+  bold: (s: string) => string
+): { text: string; color: number } {
+  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
+  const who = `${network} validator ${bold(payload.validator)}`
+  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
+
+  switch (payload.status) {
+    case 'joining':
+      return { text: `🟡 ${who} set to join the ${bold('active')} set at the next epoch${epochPart}`, color: 0xeab308 }
+    case 'leaving':
+      return { text: `🟠 ${who} set to leave the ${bold('active')} set at the next epoch${epochPart}`, color: 0xf97316 }
+    case 'active':
+      return payload.previous === 'leaving'
+        ? { text: `🟢 ${who} stays in the ${bold('active')} set${epochPart}`, color: 0x22c55e }
+        : { text: `🟢 ${who} now in ${bold('active')} set${epochPart}`, color: 0x22c55e }
+    default:
+      return payload.previous === 'joining'
+        ? { text: `🔴 ${who} no longer set to join the ${bold('active')} set${epochPart}`, color: 0xef4444 }
+        : { text: `🔴 ${who} now in ${bold('inactive')} set${epochPart}`, color: 0xef4444 }
+  }
 }
 
 const SEND_TIMEOUT_MS = 10_000
@@ -449,7 +480,7 @@ export async function sendLifecycleNotifications(
   }
 }
 
-// Validator set status change (active <-> inactive) - Telegram
+// Validator set status change - Telegram
 export async function sendTelegramStatusChange(
   botToken: string,
   chatId: string,
@@ -457,28 +488,19 @@ export async function sendTelegramStatusChange(
 ): Promise<boolean> {
   if (!botToken || !chatId) return false
 
-  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
-  const emoji = payload.status === 'active' ? '🟢' : '🔴'
-  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
+  const { text } = statusChangeLine(payload, (s) => `*${s}*`)
 
-  const message = `${emoji} ${network} validator *${payload.validator}* now in *${payload.status}* set${epochPart}`
-
-  return telegramSend(botToken, chatId, message, 'Telegram status change alert')
+  return telegramSend(botToken, chatId, text, 'Telegram status change alert')
 }
 
-// Validator set status change (active <-> inactive) - Discord
+// Validator set status change - Discord
 export async function sendDiscordStatusChange(
   webhookUrl: string,
   payload: StatusChangePayload
 ): Promise<boolean> {
   if (!webhookUrl) return false
 
-  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
-  const emoji = payload.status === 'active' ? '🟢' : '🔴'
-  const color = payload.status === 'active' ? 0x22c55e : 0xef4444
-  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
-
-  const description = `${emoji} ${network} validator **${payload.validator}** now in **${payload.status}** set${epochPart}`
+  const { text: description, color } = statusChangeLine(payload, (s) => `**${s}**`)
 
   const embed = {
     embeds: [{
@@ -503,19 +525,16 @@ export async function sendDiscordStatusChange(
   }
 }
 
-// Validator set status change (active <-> inactive) - Slack
+// Validator set status change - Slack
 export async function sendSlackStatusChange(
   webhookUrl: string,
   payload: StatusChangePayload
 ): Promise<boolean> {
   if (!webhookUrl) return false
 
-  const network = payload.network.charAt(0).toUpperCase() + payload.network.slice(1)
-  const emoji = payload.status === 'active' ? '🟢' : '🔴'
-  const color = payload.status === 'active' ? '#22c55e' : '#ef4444'
-  const epochPart = payload.epoch !== undefined ? ` (Epoch ${payload.epoch})` : ''
-
-  const text = `${emoji} ${network} validator *${payload.validator}* now in *${payload.status}* set${epochPart}`
+  const line = statusChangeLine(payload, (s) => `*${s}*`)
+  const text = line.text
+  const color = `#${line.color.toString(16).padStart(6, '0')}`
 
   try {
     const res = await fetch(webhookUrl, {

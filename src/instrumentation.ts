@@ -2,6 +2,7 @@
 // https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 
 import { sendLifecycleNotifications, sendRpcAlert, sendTelegramAlert, sendDiscordAlert, sendSlackAlert, sendTelegramStatusChange, sendDiscordStatusChange, sendSlackStatusChange, sendPagerDutyAlert } from '@/lib/alerts'
+import type { SetState } from '@/lib/alerts'
 import { parseRpcConfig } from '@/lib/api'
 
 let shutdownHandlersRegistered = false
@@ -40,8 +41,9 @@ const missedBlockCheckBusy = { running: false }
 const rpcHealthCheckBusy = { running: false }
 const validatorBlockStates: Map<string, ValidatorBlockState> = new Map()
 
-// Track validator active/inactive set membership
-const validatorStatusStates: Map<string, 'active' | 'inactive'> = new Map()
+// Track where each validator stands in the active set
+const validatorStatusStates: Map<string, SetState> = new Map()
+const SET_STATES: readonly string[] = ['active', 'inactive', 'joining', 'leaving']
 let cachedConfig: Awaited<ReturnType<typeof getAlertConfig>> | null = null
 let rpcHealthCheckInterval: NodeJS.Timeout | null = null
 
@@ -676,7 +678,11 @@ async function checkValidatorMissedBlocks(
   }
 }
 
-// Check validator active/inactive set membership
+// Check where the validator stands in the active set. The API's set_state
+// tells a validator that is about to join or leave from one that is in or out,
+// so the change is reported when the stake moves and again when it takes
+// effect at the epoch change. An API without set_state only has "pending" for
+// both in-between cases; that is skipped, as before.
 async function checkValidatorStatus(
   validatorId: string,
   network: 'mainnet' | 'testnet',
@@ -700,9 +706,9 @@ async function checkValidatorStatus(
     const data = await res.json()
     if (!data.success || !data.uptime) return
 
-    const currentStatus = data.uptime.status
-
-    if (currentStatus !== 'active' && currentStatus !== 'inactive') return
+    const reported = SET_STATES.includes(data.uptime.set_state) ? data.uptime.set_state : data.uptime.status
+    if (!SET_STATES.includes(reported)) return
+    const currentStatus = reported as SetState
 
     const key = `${validatorId}-${network}`
     const prevStatus = validatorStatusStates.get(key)
@@ -719,13 +725,13 @@ async function checkValidatorStatus(
 
     const networkLabel = network.charAt(0).toUpperCase() + network.slice(1)
     const epochPart = currentEpoch !== null ? ` (Epoch ${currentEpoch})` : ''
-    const emoji = currentStatus === 'active' ? '🟢' : '🔴'
-    console.log(`[Monadoring] ${emoji} ${validatorName} ${networkLabel} ~ now in ${currentStatus} set${epochPart}`)
+    console.log(`[Monadoring] ${validatorName} ${networkLabel} ~ set state ${prevStatus} -> ${currentStatus}${epochPart}`)
 
     const payload = {
       validator: validatorName,
       network,
-      status: currentStatus as 'active' | 'inactive',
+      status: currentStatus,
+      previous: prevStatus,
       epoch: currentEpoch ?? undefined
     }
 
